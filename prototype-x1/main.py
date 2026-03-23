@@ -69,6 +69,42 @@ except Exception as _tts_err:
         pass
 
 
+import random as _random
+
+# Short filler phrases — spoken before the real response so she feels present,
+# not like a text dump.  Rotates randomly; never the same one twice in a row.
+_FILLERS = [
+    "Hey, just thinking.",
+    "Mm.",
+    "Hold on.",
+    "Right.",
+    "Let me think on that.",
+    "Yeah.",
+    "Okay.",
+    "Hmm.",
+]
+_last_filler: str = ""
+
+
+def breath_then_speak(text: str) -> None:
+    """
+    Human-paced pre-speech ritual:
+      1. Two-second pause — she's processing, not blasting.
+      2. A random filler phrase out loud — she's here, not a text dump.
+      3. Then the actual response.
+    """
+    global _last_filler
+    time.sleep(2)                                   # the breath
+
+    # Pick a filler that isn't the same as last time
+    pool = [f for f in _FILLERS if f != _last_filler]
+    filler = _random.choice(pool)
+    _last_filler = filler
+    speak(filler)
+
+    speak(text)                                     # the real thing
+
+
 def trickle_print(text: str, wpm: int = SPEECH_WPM) -> None:
     """
     Print text word-by-word at speech pace so the terminal stays in sync
@@ -255,13 +291,15 @@ def main() -> None:
                     response = data
                     full_text = "".join(token_buf)
                     if full_text:
-                        # Speak in background; print at same WPM in foreground
+                        # breath_then_speak: 2s pause → filler → response, in background
+                        # trickle_print releases words at SPEECH_WPM in foreground
                         tts_thread: threading.Thread | None = None
                         if _TTS_AVAILABLE:
                             tts_thread = threading.Thread(
-                                target=speak, args=(full_text,), daemon=True
+                                target=breath_then_speak, args=(full_text,), daemon=True
                             )
                             tts_thread.start()
+                        time.sleep(2)           # foreground waits the same breath
                         trickle_print(full_text)
                         if tts_thread is not None:
                             tts_thread.join()   # wait for voice before showing YOU:
