@@ -24,49 +24,55 @@ from pathlib import Path
 # Words-per-minute that pyttsx3 is set to — terminal output matches this rate
 SPEECH_WPM = 150
 
-# ── Local TTS (pyttsx3 / NSSpeechSynthesizer on Mac) ─────────────────────────
-try:
-    import pyttsx3 as _pyttsx3
+# ── Local TTS ─────────────────────────────────────────────────────────────────
+# macOS: use the built-in `say` command via subprocess.
+#   • Works from ANY thread — no main-thread restriction like pyttsx3/NSSpeechSynthesizer
+#   • Same voice, same engine under the hood, zero setup
+# Raspberry Pi / Linux: fall back to pyttsx3 (espeak driver, main-thread safe there)
+import shutil as _shutil
+import subprocess as _subprocess
 
-    def _build_tts_engine() -> "_pyttsx3.Engine":
-        engine = _pyttsx3.init()
-        engine.setProperty("rate", 150)       # slower = sounds human
-        engine.setProperty("volume", 0.9)     # not blasting
-        # Pick a voice — prefer a female en-US voice on Mac if available
-        voices = engine.getProperty("voices")
-        preferred = None
-        for v in voices:
-            vid = (v.id or "").lower()
-            if "samantha" in vid or ("en_us" in vid and "female" in vid):
-                preferred = v.id
-                break
-        if preferred:
-            engine.setProperty("voice", preferred)
-        return engine
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
-    _TTS_ENGINE = _build_tts_engine()
-    _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
-
+if _shutil.which("say"):
+    # macOS path — `say -r 150` matches our SPEECH_WPM target
     def speak(text: str) -> None:
-        """Speak text locally, pausing 150 ms between sentences."""
-        # Strip markdown-ish noise so NSSpeechSynthesizer doesn't read symbols
         clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
         if not clean:
             return
-        sentences = _SENTENCE_RE.split(clean)
-        for sentence in sentences:
+        for sentence in _SENTENCE_RE.split(clean):
             sentence = sentence.strip()
             if sentence:
-                _TTS_ENGINE.say(sentence)
-                _TTS_ENGINE.runAndWait()
+                _subprocess.run(["say", "-r", "150", sentence], check=False)
                 time.sleep(0.15)
 
     _TTS_AVAILABLE = True
 
-except Exception as _tts_err:
-    _TTS_AVAILABLE = False
-    def speak(text: str) -> None:  # type: ignore[misc]
-        pass
+else:
+    # Pi / Linux fallback — pyttsx3 is main-thread safe on those platforms
+    try:
+        import pyttsx3 as _pyttsx3
+        _TTS_ENGINE = _pyttsx3.init()
+        _TTS_ENGINE.setProperty("rate", 150)
+        _TTS_ENGINE.setProperty("volume", 0.9)
+
+        def speak(text: str) -> None:
+            clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
+            if not clean:
+                return
+            for sentence in _SENTENCE_RE.split(clean):
+                sentence = sentence.strip()
+                if sentence:
+                    _TTS_ENGINE.say(sentence)
+                    _TTS_ENGINE.runAndWait()
+                    time.sleep(0.15)
+
+        _TTS_AVAILABLE = True
+
+    except Exception:
+        _TTS_AVAILABLE = False
+        def speak(text: str) -> None:  # type: ignore[misc]
+            pass
 
 
 import random as _random
