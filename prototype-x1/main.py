@@ -34,35 +34,63 @@ import subprocess as _subprocess
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
+# ── Interrupt state ───────────────────────────────────────────────────────────
+# Ctrl+C while ARIA speaks: KeyboardInterrupt is caught in the main thread,
+# which sets this event and terminates the active `say` subprocess.
+# No raw-mode stdin hacks — those corrupt the terminal.
+_stop_speaking: threading.Event = threading.Event()
+_active_say_proc: "_subprocess.Popen[bytes] | None" = None
+_proc_lock: threading.Lock = threading.Lock()
+
+
+def _kill_active_say() -> None:
+    """Terminate the currently running `say` subprocess, if any."""
+    global _active_say_proc
+    with _proc_lock:
+        if _active_say_proc and _active_say_proc.poll() is None:
+            _active_say_proc.terminate()
+
+
 if _shutil.which("say"):
-    # macOS path — `say -r 150` matches our SPEECH_WPM target
-    def speak(text: str) -> None:
+    # macOS — subprocess `say`, works from any thread
+    def speak(text: str, stop: "threading.Event | None" = None) -> None:
+        global _active_say_proc
         clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
         if not clean:
             return
         for sentence in _SENTENCE_RE.split(clean):
             sentence = sentence.strip()
-            if sentence:
-                _subprocess.run(["say", "-r", "150", sentence], check=False)
-                time.sleep(0.15)
+            if not sentence:
+                continue
+            if stop and stop.is_set():
+                return
+            proc = _subprocess.Popen(["say", "-r", "150", sentence])
+            with _proc_lock:
+                _active_say_proc = proc
+            proc.wait()
+            with _proc_lock:
+                _active_say_proc = None
+            if stop and stop.is_set():
+                return
+            time.sleep(0.15)
 
     _TTS_AVAILABLE = True
 
 else:
-    # Pi / Linux fallback — pyttsx3 is main-thread safe on those platforms
+    # Pi / Linux fallback
     try:
         import pyttsx3 as _pyttsx3
         _TTS_ENGINE = _pyttsx3.init()
         _TTS_ENGINE.setProperty("rate", 150)
         _TTS_ENGINE.setProperty("volume", 0.9)
 
-        def speak(text: str) -> None:
+        def speak(text: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
             clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
             if not clean:
                 return
             for sentence in _SENTENCE_RE.split(clean):
                 sentence = sentence.strip()
-                if sentence:
+                if sentence and not (stop and stop.is_set()):
                     _TTS_ENGINE.say(sentence)
                     _TTS_ENGINE.runAndWait()
                     time.sleep(0.15)
@@ -71,7 +99,7 @@ else:
 
     except Exception:
         _TTS_AVAILABLE = False
-        def speak(text: str) -> None:  # type: ignore[misc]
+        def speak(text: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
             pass
 
 
@@ -92,40 +120,46 @@ _FILLERS = [
 _last_filler: str = ""
 
 
-def breath_then_speak(text: str) -> None:
+def breath_then_speak(text: str, stop: "threading.Event | None" = None) -> None:
     """
     Human-paced pre-speech ritual:
-      1. Two-second pause — she's processing, not blasting.
-      2. A random filler phrase out loud — she's here, not a text dump.
+      1. Two-second pause — interruptible, 100ms ticks so spacebar cuts in fast.
+      2. A random filler phrase out loud.
       3. Then the actual response.
     """
     global _last_filler
-    time.sleep(2)                                   # the breath
+    # Interruptible breath — 20 × 100ms = 2s, but exits immediately on stop
+    for _ in range(20):
+        if stop and stop.is_set():
+            return
+        time.sleep(0.1)
 
-    # Pick a filler that isn't the same as last time
     pool = [f for f in _FILLERS if f != _last_filler]
     filler = _random.choice(pool)
     _last_filler = filler
-    speak(filler)
+    speak(filler, stop)
+    speak(text, stop)
 
-    speak(text)                                     # the real thing
 
-
-def trickle_print(text: str, wpm: int = SPEECH_WPM) -> None:
+def trickle_print(text: str, wpm: int = SPEECH_WPM,
+                  stop: "threading.Event | None" = None) -> None:
     """
     Print text word-by-word at speech pace so the terminal stays in sync
-    with what ARIA is saying out loud.  Humans read ~150 WPM; so does she.
+    with what ARIA is saying out loud.  Bails immediately if stop is set.
     """
     clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
     words = clean.split()
     if not words:
         return
-    delay = 60.0 / wpm          # seconds per word at target WPM
+    delay = 60.0 / wpm
     for i, word in enumerate(words):
+        if stop and stop.is_set():
+            print()     # clean newline on interrupt
+            return
         suffix = " " if i < len(words) - 1 else ""
         print(word + suffix, end="", flush=True)
         time.sleep(delay)
-    print()                     # final newline
+    print()             # final newline
 
 # ── Rich for pretty output (optional) ─────────────────────────────────────────
 try:
@@ -202,7 +236,7 @@ def main() -> None:
     print_info(f"Model: {cfg.llm.ollama_model} | fallback: {cfg.llm.cloud_fallback}")
     tts_status = "local TTS ready" if _TTS_AVAILABLE else "TTS unavailable"
     print_info(f"Voice: {tts_status}")
-    print_info("Type 'quit' to exit. /skills /memory /reset /reload for controls.")
+    print_info("Type 'quit' to exit. Ctrl+C to cut speech. /skills /memory /reset /reload")
     print()
 
     # ── Startup voice — verify engine, check camera, greet ───────────────────
@@ -228,7 +262,7 @@ def main() -> None:
 
     while True:
         try:
-            user_input = input("YOU: ").strip()
+            user_input = input("Neokode: ").strip()
         except (KeyboardInterrupt, EOFError):
             print()
             print_info("Shutting down.")
@@ -297,18 +331,32 @@ def main() -> None:
                     response = data
                     full_text = "".join(token_buf)
                     if full_text:
-                        # breath_then_speak: 2s pause → filler → response, in background
-                        # trickle_print releases words at SPEECH_WPM in foreground
+                        # ── Speak + trickle — Ctrl+C interrupts both ──────
+                        _stop_speaking.clear()
                         tts_thread: threading.Thread | None = None
                         if _TTS_AVAILABLE:
                             tts_thread = threading.Thread(
-                                target=breath_then_speak, args=(full_text,), daemon=True
+                                target=breath_then_speak,
+                                args=(full_text, _stop_speaking),
+                                daemon=True,
                             )
                             tts_thread.start()
-                        time.sleep(2)           # foreground waits the same breath
-                        trickle_print(full_text)
-                        if tts_thread is not None:
-                            tts_thread.join()   # wait for voice before showing YOU:
+                        try:
+                            # Interruptible breath then trickle in foreground
+                            for _ in range(20):
+                                if _stop_speaking.is_set():
+                                    break
+                                time.sleep(0.1)
+                            trickle_print(full_text, stop=_stop_speaking)
+                        except KeyboardInterrupt:
+                            # Ctrl+C — cut the voice, return to YOU:
+                            _stop_speaking.set()
+                            _kill_active_say()
+                            print()  # clean newline
+                        finally:
+                            _stop_speaking.set()
+                            if tts_thread is not None:
+                                tts_thread.join(timeout=2)
                     else:
                         print()
 
