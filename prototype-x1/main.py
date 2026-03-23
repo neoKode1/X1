@@ -120,6 +120,34 @@ _FILLERS = [
 _last_filler: str = ""
 
 
+_SPEECH_STRIP_RE = re.compile(
+    r"(?m)"
+    r"(^##\s.*$"                          # ## Section headers
+    r"|^BCS[:\s].*$"                       # BCS: ... lines
+    r"|^Body Completion.*$"                # Body Completion Score lines
+    r"|^Hardware State.*$"                 # Hardware State lines
+    r"|^Webcam:.*$"                        # Webcam: status
+    r"|^Motors:.*$"                        # Motors: status
+    r"|^GPIO:.*$"                          # GPIO: status
+    r"|^Relevant memory.*$"               # Relevant memory prepended lines
+    r"|\*[^*]+\*"                          # *stage directions*
+    r"|\[[^\]]*hum[^\]]*\]"               # [processing units hum] etc
+    r")"
+)
+
+
+def _strip_for_speech(text: str) -> str:
+    """Remove metadata / stage-direction lines before sending to TTS.
+
+    The full text still streams to the terminal — Neokode can see it.
+    ARIA only *speaks* the conversational part.
+    """
+    cleaned = _SPEECH_STRIP_RE.sub("", text)
+    # Collapse multiple blank lines left behind
+    cleaned = re.sub(r"\n{2,}", "\n", cleaned).strip()
+    return cleaned
+
+
 def breath_then_speak(text: str, stop: "threading.Event | None" = None) -> None:
     """
     Human-paced pre-speech ritual:
@@ -335,9 +363,10 @@ def main() -> None:
                         _stop_speaking.clear()
                         tts_thread: threading.Thread | None = None
                         if _TTS_AVAILABLE:
+                            speech_text = _strip_for_speech(full_text)
                             tts_thread = threading.Thread(
                                 target=breath_then_speak,
-                                args=(full_text, _stop_speaking),
+                                args=(speech_text, _stop_speaking),
                                 daemon=True,
                             )
                             tts_thread.start()
