@@ -469,6 +469,47 @@ class Brain:
             latency_ms=latency,
         ))
 
+    def accept_peer_handshake(self, payload: dict) -> dict:
+        """
+        Validate a peer handshake and return a sync packet.
+
+        On success returns:
+          {"ok": True,  "peer_id": str, "bcs": str, "scrap": str}
+        On failure returns:
+          {"ok": False, "reason": str}
+        """
+        from .peer import verify_handshake, PEER_ID as DEFAULT_PEER
+
+        ok, reason = verify_handshake(payload)
+        if not ok:
+            log.warning("Peer handshake rejected: %s", reason)
+            return {"ok": False, "reason": reason}
+
+        peer_id = payload.get("peer_id", DEFAULT_PEER)
+
+        # Confirm the peer is in the pre-authorized set
+        if not self.trust.is_peer(peer_id):
+            log.warning("Peer handshake rejected: %r not in _PEERS", peer_id)
+            return {"ok": False, "reason": f"{peer_id!r} is not a registered peer"}
+
+        log.info("Peer handshake accepted: %s", peer_id)
+
+        # Gather sync state for the peer
+        bcs_summary = self.bcs.state.summary()
+        scrap_report = "[scrap unavailable]"
+        try:
+            from ..vision.material_tagger import MaterialTagger, SCRAP_PATH
+            scrap_report = MaterialTagger(scrap_path=SCRAP_PATH).report()
+        except Exception:
+            pass
+
+        return {
+            "ok":      True,
+            "peer_id": peer_id,
+            "bcs":     bcs_summary,
+            "scrap":   scrap_report,
+        }
+
     def reset(self) -> None:
         self.memory.clear_session()
 

@@ -24,6 +24,10 @@ log = logging.getLogger("x1.trust")
 # Hardcoded — cannot be promoted or demoted at runtime
 _FOUNDERS: frozenset[str] = frozenset({"neokode", "neocode"})
 
+# Pre-authorized peer nodes — Friend tier, no manual introduction required.
+# These are ARIA instances or trusted subsystems, not humans.
+_PEERS: frozenset[str] = frozenset({"backup_001"})
+
 REGISTRY_PATH = Path(__file__).parent.parent / "memory" / "trust.json"
 
 
@@ -74,7 +78,7 @@ class TrustRegistry:
         key = name.strip().lower()
         if key in _FOUNDERS:
             return Tier.FOUNDER
-        if key in self._friends:
+        if key in _PEERS or key in self._friends:
             return Tier.FRIEND
         return Tier.UNKNOWN
 
@@ -84,12 +88,18 @@ class TrustRegistry:
     def is_trusted(self, name: str) -> bool:
         return self.get_tier(name) >= Tier.FRIEND
 
+    def is_peer(self, name: str) -> bool:
+        return name.strip().lower() in _PEERS
+
     def describe(self, name: str) -> str:
+        key = name.strip().lower()
         tier = self.get_tier(name)
         if tier == Tier.FOUNDER:
             return f"{name} is the Founder — full authority."
+        if key in _PEERS:
+            return f"{name} is a pre-authorized Peer node — Friend tier."
         if tier == Tier.FRIEND:
-            e = self._friends[name.strip().lower()]
+            e = self._friends[key]
             return f"{name} is a Friend (introduced by {e.introduced_by})."
         return f"{name} is Unknown — restricted to basic conversation."
 
