@@ -142,9 +142,21 @@ def main() -> None:
     print_info("Type 'quit' to exit. /skills /memory /reset /reload for controls.")
     print()
 
-    # ── Startup voice check ────────────────────────────────────────────────────
+    # ── Startup voice — check camera, then greet ──────────────────────────────
     if _TTS_AVAILABLE:
-        speak("Hey ARIA. I'm Neo Systems, humming at 100.")
+        # Probe webcam — silent import, no crash if cv2 missing
+        _cam_live = False
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from vision.camera import capture_webcam
+            _cam_live = capture_webcam() is not None
+        except Exception:
+            pass
+
+        if _cam_live:
+            speak("Hello. I've got eyes. Let me see something.")
+        else:
+            speak("Hello.")
 
     # ── REPL ───────────────────────────────────────────────────────────────────
     skills_dir = Path(__file__).parent / "skills"
