@@ -151,10 +151,26 @@ class Brain:
         self._load_external_skills()
         self._register_trust_skills()
         self._register_bcs_skills()
-        log.info("Brain ready — name=%s ollama=%s/%s fallback=%s | BCS=%s",
+        # Hardware awareness — probed once at boot, injected as context every turn
+        self._hw_webcam: bool = self._probe_webcam()
+        log.info("Brain ready — name=%s ollama=%s/%s fallback=%s | BCS=%s webcam=%s",
                  self.cfg.name, self.cfg.llm.ollama_host,
                  self.cfg.llm.ollama_model, self.cfg.llm.cloud_fallback,
-                 self.bcs.state.summary())
+                 self.bcs.state.summary(), self._hw_webcam)
+
+    @staticmethod
+    def _probe_webcam() -> bool:
+        """Check if a webcam is physically available. Silent — never raises."""
+        try:
+            import sys
+            from pathlib import Path as _Path
+            _root = str(_Path(__file__).parent.parent)
+            if _root not in sys.path:
+                sys.path.insert(0, _root)
+            from vision.camera import capture_webcam  # type: ignore[import]
+            return capture_webcam() is not None
+        except Exception:
+            return False
 
     def _load_external_skills(self) -> None:
         skills_dir = Path(__file__).parent.parent / "skills"
@@ -282,7 +298,13 @@ class Brain:
         except Exception:
             pass
 
-        system = SYSTEM_PROMPT.format(skill_list=skill_list) + trust_ctx + bcs_ctx
+        # Hardware state — injected so she knows what she has without being told
+        hw_ctx = "\n## Hardware State\n"
+        hw_ctx += f"Webcam: {'online — vision available' if self._hw_webcam else 'offline — no camera detected'}\n"
+        hw_ctx += "Motors: not yet connected\n"
+        hw_ctx += "GPIO: mock (Mac dev environment)\n"
+
+        system = SYSTEM_PROMPT.format(skill_list=skill_list) + trust_ctx + bcs_ctx + hw_ctx
 
         messages: list[Message] = [{"role": "system", "content": system}]
 
