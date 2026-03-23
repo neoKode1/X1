@@ -80,3 +80,38 @@ def capture(source: str = "screen", device: int = 0) -> Frame:
         log.warning("Webcam unavailable — falling back to screen capture")
     return capture_screen()
 
+
+def describe_frame(frame: Frame, api_key: str) -> str:
+    """Send a captured frame to Anthropic and return a one-sentence description."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=80,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": frame.frame_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Describe what you see in one short sentence. "
+                            "Be specific: objects, people, environment. No filler."
+                        ),
+                    },
+                ],
+            }],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        log.warning("Vision describe failed: %s", e)
+        return f"[vision error] {e}"
+

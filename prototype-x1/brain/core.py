@@ -136,8 +136,10 @@ Wrap ALL skill calls in a fenced block — always:
 ```
 
 **Key skill signatures (use EXACTLY these arg names):**
-- `screengrab` — capture what the camera or screen sees
-  `{{"name": "screengrab", "args": {{"source": "webcam"}}}}` — webcam feed
+- `screengrab` — captures webcam or screen and returns a plain-text description of what's visible.
+  ALWAYS call this when asked "can you see?", "what do you see?", or anything about vision.
+  NEVER describe what you see without calling screengrab first. Never hallucinate vision.
+  `{{"name": "screengrab", "args": {{"source": "webcam"}}}}` — webcam feed (default)
   `{{"name": "screengrab", "args": {{"source": "screen"}}}}` — desktop screenshot
 - `shell` — run a short safe shell command: `{{"name": "shell", "args": {{"command": "ls -la"}}}}`
 - `python` — run safe Python: `{{"name": "python", "args": {{"code": "print('hi')"}}}}`

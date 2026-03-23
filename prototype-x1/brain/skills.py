@@ -141,25 +141,22 @@ def _skill_shell(command: str) -> str:
         return f"[SHELL ERROR] {e}"
 
 
-def _skill_screengrab(source: str = "screen") -> str:
-    """Capture screen or webcam. Returns JSON with frame_b64 for the vision panel."""
-    import json
+def _skill_screengrab(source: str = "webcam") -> str:
+    """Capture webcam or screen and return a plain-text description via vision AI."""
+    import os
     import sys
     from pathlib import Path
-    # Add prototype-x1 parent to path so vision module is importable
     _proto = Path(__file__).parent.parent
     if str(_proto) not in sys.path:
         sys.path.insert(0, str(_proto))
     try:
-        from vision.camera import capture  # type: ignore[import]
+        from vision.camera import capture, describe_frame  # type: ignore[import]
         frame = capture(source=source)
-        return json.dumps({
-            "__vision__": True,
-            "frame_b64": frame.frame_b64,
-            "source": frame.source,
-            "width": frame.width,
-            "height": frame.height,
-        })
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return f"[screengrab] frame captured ({frame.width}x{frame.height}) — no vision API key to describe it"
+        description = describe_frame(frame, api_key)
+        return f"[{source}] {description}"
     except Exception as e:
         return f"[SCREENGRAB ERROR] {e}"
 
