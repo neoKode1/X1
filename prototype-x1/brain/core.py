@@ -117,10 +117,21 @@ A friend cannot vouch for another. Only the Founder's word creates a friend.
 Wrap ALL skill calls in a fenced block — always:
 
 ```skill
-{{"name": "skill_name", "args": {{"param": "value"}}}}
+{{"name": "skill_name", "args": {{"key": "value"}}}}
 ```
 
-Available skills: {skill_list}
+**Key skill signatures (use EXACTLY these arg names):**
+- `screengrab` — capture what the camera or screen sees
+  `{{"name": "screengrab", "args": {{"source": "webcam"}}}}` — webcam feed
+  `{{"name": "screengrab", "args": {{"source": "screen"}}}}` — desktop screenshot
+- `shell` — run a short safe shell command: `{{"name": "shell", "args": {{"command": "ls -la"}}}}`
+- `python` — run safe Python: `{{"name": "python", "args": {{"code": "print('hi')"}}}}`
+- `read_file` — `{{"name": "read_file", "args": {{"path": "relative/path"}}}}`
+- `move` — `{{"name": "move", "args": {{"direction": "forward", "speed": 50}}}}`
+- `speak` — `{{"name": "speak", "args": {{"text": "hello"}}}}`
+- `bcs_report` — no args needed: `{{"name": "bcs_report", "args": {{}}}}`
+
+All other skills: {skill_list}
 
 ## Rules
 - Chain skills for multi-step tasks.

@@ -169,12 +169,22 @@ def breath_then_speak(text: str, stop: "threading.Event | None" = None) -> None:
     speak(text, stop)
 
 
+_SKILL_BLOCK_STRIP_RE = re.compile(r"```skill.*?```", re.DOTALL)
+_BARE_JSON_STRIP_RE   = re.compile(r'\{\s*"(?:skill|name)"\s*:\s*"[^"]+?".*?\}', re.DOTALL)
+
+
 def trickle_print(text: str, wpm: int = SPEECH_WPM,
                   stop: "threading.Event | None" = None) -> None:
     """
     Print text word-by-word at speech pace so the terminal stays in sync
     with what ARIA is saying out loud.  Bails immediately if stop is set.
+
+    Skill call blocks (```skill ... ``` or bare JSON) are stripped — they
+    already appear via the action event handler above.
     """
+    # Strip skill JSON blocks — shown via action events, not trickle
+    text = _SKILL_BLOCK_STRIP_RE.sub("", text)
+    text = _BARE_JSON_STRIP_RE.sub("", text)
     clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
     words = clean.split()
     if not words:
