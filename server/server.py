@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,54 @@ def status_msg(state: str, extra: dict | None = None) -> str:
         payload.update(extra)
     return msg("status", payload)
 
+# ── Streaming bridge: sync generator → async WebSocket ───────────────────────
+async def _stream_brain(ws: WebSocket, brain: Any, user_text: str) -> None:
+    """Run brain.stream() in a thread and relay events to the WebSocket."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+
+    def run_in_thread():
+        try:
+            for event in brain.stream(user_text):
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+
+    threading.Thread(target=run_in_thread, daemon=True).start()
+
+    final_response: dict | None = None
+
+    while True:
+        event = await queue.get()
+        if event is _DONE:
+            break
+
+        kind, data = event
+        if kind == "thinking":
+            await ws.send_text(msg("thinking", {}))
+        elif kind == "token":
+            await ws.send_text(msg("token", {"text": data}))
+        elif kind == "action":
+            await ws.send_text(msg("action", {"action": data}))
+        elif kind == "done":
+            br = data  # BrainResponse
+            final_response = {
+                "text": br.text,
+                "provider": br.provider,
+                "latency_ms": br.latency_ms,
+                "skill_calls": br.skill_calls,
+            }
+        elif kind == "error":
+            await ws.send_text(msg("error", {"message": data}))
+            return
+
+    if final_response is not None:
+        await ws.send_text(msg("response", final_response))
+
+
 # ── WebSocket handler ─────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -96,37 +145,12 @@ async def websocket_endpoint(ws: WebSocket):
                 user_text: str = data["payload"]["text"]
                 log.info("Command received: %s", user_text)
 
-                await ws.send_text(msg("thinking", {}))
-
                 if brain:
-                    # Run brain in thread pool to avoid blocking the event loop
-                    loop = asyncio.get_running_loop()
-                    response = await loop.run_in_executor(
-                        None, brain.process, user_text
-                    )
-
-                    # Emit each skill call as an "action" event
-                    for call, result in zip(response.skill_calls, response.skill_results):
-                        params = {"name": call.get("name", "unknown"), **call.get("args", {})}
-                        await ws.send_text(msg("action", {
-                            "action": {
-                                "type": "SKILL",
-                                "params": params,
-                                "result": result,
-                            }
-                        }))
-                        await asyncio.sleep(0.05)
-
-                    # Emit final response
-                    await ws.send_text(msg("response", {
-                        "text": response.text,
-                        "provider": response.provider,
-                        "latency_ms": response.latency_ms,
-                        "skill_calls": response.skill_calls,
-                    }))
+                    await _stream_brain(ws, brain, user_text)
                 else:
                     # Mock mode — brain not available
                     reason = _import_err if not BRAIN_AVAILABLE else "brain init failed"
+                    await ws.send_text(msg("thinking", {}))
                     await asyncio.sleep(0.4)
                     await ws.send_text(msg("response", {
                         "text": f"[MOCK] {reason}. You said: {user_text}",

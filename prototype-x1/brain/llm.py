@@ -54,6 +54,33 @@ def _try_openai(cfg: "LLMConfig", messages: list[Message]) -> str:
     return resp.choices[0].message.content or ""
 
 
+def stream_llm(cfg: "LLMConfig", messages: list[Message]):
+    """Yield (token_text, provider) tuples as they arrive from Ollama.
+
+    Falls back to collecting the full cloud reply and yielding it as one chunk
+    if Ollama is unavailable (cloud providers don't stream here yet).
+    """
+    try:
+        import ollama
+        stream = ollama.chat(
+            model=cfg.ollama_model,
+            messages=messages,
+            stream=True,
+            options={"temperature": cfg.temperature, "num_predict": cfg.max_tokens},
+        )
+        for chunk in stream:
+            token = chunk.get("message", {}).get("content", "")
+            if token:
+                yield token, "ollama"
+        return
+    except Exception as e:
+        log.warning("Ollama streaming unavailable (%s), falling back to cloud", e)
+
+    # Cloud fallback — yield the full reply as a single token
+    reply, provider = call_llm(cfg, messages)
+    yield reply, provider
+
+
 def call_llm(cfg: "LLMConfig", messages: list[Message]) -> tuple[str, str]:
     """Returns (reply_text, provider_used)."""
     # 1. Try Ollama

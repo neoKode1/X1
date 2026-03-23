@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import BrainConfig
-from .llm import call_llm, Message
+from .llm import call_llm, stream_llm, Message
 from .memory import EpisodicMemory
 from . import skills as skill_registry
 
@@ -148,6 +148,75 @@ class Brain:
             provider=provider,
             latency_ms=latency,
         )
+
+    def stream(self, user_input: str, max_skill_rounds: int = 3):
+        """Sync generator that yields streaming events for the server to relay.
+
+        Yields:
+            ("thinking", None)
+            ("token", str)          -- one per LLM token
+            ("action", dict)        -- one per skill execution
+            ("done", BrainResponse)
+        """
+        t0 = time.time()
+        yield ("thinking", None)
+
+        recalled = self.memory.recall(user_input)
+        messages = self._build_messages(user_input, recalled)
+
+        # Stream first LLM reply token-by-token
+        full_text = ""
+        provider = "unknown"
+        for token, prov in stream_llm(self.cfg.llm, messages):
+            full_text += token
+            provider = prov
+            yield ("token", token)
+
+        all_skill_calls: list[dict] = []
+        all_skill_results: list[str] = []
+
+        # Skill execution rounds (non-streaming — skills are fast)
+        for _round in range(max_skill_rounds):
+            calls = self._extract_skill_calls(full_text)
+            if not calls:
+                break
+            results = self._execute_skills(calls)
+            all_skill_calls.extend(calls)
+            all_skill_results.extend(results)
+
+            for call, result in zip(calls, results):
+                params = {"name": call.get("name", "unknown"), **call.get("args", {})}
+                yield ("action", {
+                    "type": "SKILL",
+                    "params": params,
+                    "result": result,
+                })
+
+            # Feed skill results back — stream the continuation
+            results_text = "\n".join(results)
+            messages.append({"role": "assistant", "content": full_text})
+            messages.append({"role": "user",
+                              "content": f"[SKILL RESULTS]\n{results_text}\n\nContinue."})
+            full_text = ""
+            for token, prov in stream_llm(self.cfg.llm, messages):
+                full_text += token
+                provider = prov
+                yield ("token", token)
+
+        self.memory.add("user", user_input)
+        self.memory.add("assistant", full_text)
+
+        latency = int((time.time() - t0) * 1000)
+        log.info("Stream turn complete in %dms via %s — skills=%d",
+                 latency, provider, len(all_skill_calls))
+
+        yield ("done", BrainResponse(
+            text=full_text,
+            skill_calls=all_skill_calls,
+            skill_results=all_skill_results,
+            provider=provider,
+            latency_ms=latency,
+        ))
 
     def reset(self) -> None:
         self.memory.clear_session()
