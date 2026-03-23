@@ -29,6 +29,57 @@
   function tsLabel(ms: number) {
     return new Date(ms).toLocaleTimeString();
   }
+
+  // ── Skill Builder ─────────────────────────────────────────────────────────
+  const API = 'http://localhost:8000';
+
+  let skillName = $state('');
+  let skillCode = $state('# skill_hello() → registered as "hello"\ndef skill_hello(name: str = "world") -> str:\n    return f"Hello, {name}!"');
+  let skillFiles = $state<string[]>([]);
+  let skillStatus = $state('');
+  let skillSaving = $state(false);
+
+  async function fetchSkills() {
+    try {
+      const res = await fetch(`${API}/skills`);
+      const data = await res.json();
+      skillFiles = data.skills ?? [];
+    } catch { skillFiles = []; }
+  }
+
+  async function saveSkill() {
+    const name = skillName.trim().replace(/\.py$/, '');
+    if (!name) { skillStatus = '⚠ Enter a skill name'; return; }
+    skillSaving = true;
+    skillStatus = 'Saving…';
+    try {
+      const res = await fetch(`${API}/skills/${name}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: skillCode }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        skillStatus = `✓ Saved ${data.file} (${data.bytes} B)`;
+        await fetchSkills();
+      } else {
+        skillStatus = `✗ ${data.detail ?? 'Save failed'}`;
+      }
+    } catch (e) {
+      skillStatus = `✗ ${e}`;
+    } finally {
+      skillSaving = false;
+    }
+  }
+
+  function loadSkillFile(fname: string) {
+    // Server doesn't expose file contents yet — just populate the name field
+    skillName = fname.replace(/\.py$/, '');
+    skillStatus = `Loaded name: ${skillName} — edit code and click SAVE`;
+  }
+
+  // Fetch skill list on mount
+  $effect(() => { fetchSkills(); });
 </script>
 
 <!-- Status bar -->
@@ -113,6 +164,44 @@
       </div>
     </section>
 
+    <!-- Skill Builder -->
+    <section class="panel skill-panel">
+      <h2 class="panel-title">
+        Skill Builder
+        <button class="refresh-btn" onclick={fetchSkills} title="Refresh skill list">⟳</button>
+      </h2>
+
+      <!-- Existing skills -->
+      {#if skillFiles.length > 0}
+        <div class="skill-file-list">
+          {#each skillFiles as f}
+            <button class="skill-chip" onclick={() => loadSkillFile(f)}>{f}</button>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Editor -->
+      <div class="skill-editor-row">
+        <input
+          class="skill-name-input"
+          type="text"
+          placeholder="skill_name (no .py)"
+          bind:value={skillName}
+        />
+        <button class="save-btn" onclick={saveSkill} disabled={skillSaving || !skillName.trim()}>
+          {skillSaving ? '…' : 'SAVE'}
+        </button>
+      </div>
+      <textarea
+        class="skill-code"
+        spellcheck="false"
+        bind:value={skillCode}
+      ></textarea>
+      {#if skillStatus}
+        <p class="skill-status">{skillStatus}</p>
+      {/if}
+    </section>
+
   </div>
 </main>
 
@@ -160,9 +249,25 @@
   .vision-desc { padding: 8px 12px; font-size: 12px; color: #94a3b8; border-top: 1px solid #1e2330; }
   .vision-placeholder { padding: 40px 12px; text-align: center; color: #334155; font-style: italic; }
 
-  .action-panel { flex: 1; min-height: 0; }
+  .action-panel { flex: 0 1 160px; min-height: 0; }
   .action-log { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
   .action-row { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
   .action-badge { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: #0d0f14; flex-shrink: 0; }
   .action-result { font-size: 12px; color: #94a3b8; flex: 1; min-width: 0; word-break: break-all; }
+
+  /* Skill Builder */
+  .skill-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .refresh-btn { background: none; border: none; color: #475569; cursor: pointer; font-size: 14px; margin-left: auto; padding: 0 4px; }
+  .refresh-btn:hover { color: #60a5fa; }
+  .skill-file-list { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px; border-bottom: 1px solid #1e2330; flex-shrink: 0; }
+  .skill-chip { background: #1e2330; border: 1px solid #334155; border-radius: 4px; color: #94a3b8; cursor: pointer; font-family: inherit; font-size: 10px; padding: 2px 8px; }
+  .skill-chip:hover { background: #2d3748; color: #e879f9; }
+  .skill-editor-row { display: flex; gap: 6px; padding: 8px 10px; flex-shrink: 0; }
+  .skill-name-input { flex: 1; background: #0d0f14; border: 1px solid #1e2330; border-radius: 6px; color: #e2e8f0; font-family: inherit; font-size: 12px; outline: none; padding: 5px 8px; }
+  .skill-name-input:focus { border-color: #e879f9; }
+  .save-btn { background: #6d28d9; border: none; border-radius: 6px; color: #fff; cursor: pointer; font-family: inherit; font-size: 11px; font-weight: 700; letter-spacing: 1px; padding: 0 14px; }
+  .save-btn:hover:not(:disabled) { background: #7c3aed; }
+  .save-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .skill-code { flex: 1; background: #0a0c10; border: none; border-top: 1px solid #1e2330; color: #a5f3fc; font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.6; min-height: 0; outline: none; padding: 10px 12px; resize: none; }
+  .skill-status { border-top: 1px solid #1e2330; color: #94a3b8; flex-shrink: 0; font-size: 11px; padding: 6px 10px; }
 </style>

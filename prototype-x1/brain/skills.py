@@ -50,6 +50,11 @@ def load_skills_dir(skills_dir: Path) -> None:
         _load_skill_file(path)
 
 
+def load_skill_file(path: Path) -> None:
+    """Public alias for hot-reloading a single skill file (used by the server)."""
+    _load_skill_file(path)
+
+
 def _load_skill_file(path: Path) -> None:
     name = path.stem
     spec = importlib.util.spec_from_file_location(f"x1.skills.{name}", path)
@@ -59,7 +64,23 @@ def _load_skill_file(path: Path) -> None:
     try:
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         _skill_modules[name] = mod
-        log.info("Loaded skill module: %s", name)
+
+        # Auto-register: functions named skill_<name>(...)
+        count = 0
+        for attr in dir(mod):
+            if attr.startswith("skill_"):
+                fn = getattr(mod, attr)
+                if callable(fn):
+                    register(attr[len("skill_"):], fn, override=True)
+                    count += 1
+
+        # Auto-register: explicit SKILLS = {"name": fn} dict
+        if hasattr(mod, "SKILLS") and isinstance(mod.SKILLS, dict):
+            for skill_name, fn in mod.SKILLS.items():
+                register(skill_name, fn, override=True)
+                count += 1
+
+        log.info("Loaded skill module: %s (%d skills)", name, count)
     except Exception:
         log.error("Failed to load skill %s:\n%s", name, traceback.format_exc())
 
@@ -111,17 +132,25 @@ def _skill_shell(command: str) -> str:
         return f"[SHELL ERROR] {e}"
 
 
-def _skill_screengrab() -> str:
+def _skill_screengrab(source: str = "screen") -> str:
+    """Capture screen or webcam. Returns JSON with frame_b64 for the vision panel."""
+    import json
+    import sys
+    from pathlib import Path
+    # Add prototype-x1 parent to path so vision module is importable
+    _proto = Path(__file__).parent.parent
+    if str(_proto) not in sys.path:
+        sys.path.insert(0, str(_proto))
     try:
-        import PIL.ImageGrab
-        import base64
-        import io
-        img = PIL.ImageGrab.grab()
-        img.thumbnail((640, 480))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=70)
-        b64 = base64.b64encode(buf.getvalue()).decode()
-        return f"[SCREEN CAPTURED] base64 JPEG ({len(b64)} chars)"
+        from vision.camera import capture  # type: ignore[import]
+        frame = capture(source=source)
+        return json.dumps({
+            "__vision__": True,
+            "frame_b64": frame.frame_b64,
+            "source": frame.source,
+            "width": frame.width,
+            "height": frame.height,
+        })
     except Exception as e:
         return f"[SCREENGRAB ERROR] {e}"
 
