@@ -15,8 +15,54 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
+import time
 from pathlib import Path
+
+# ── Local TTS (pyttsx3 / NSSpeechSynthesizer on Mac) ─────────────────────────
+try:
+    import pyttsx3 as _pyttsx3
+
+    def _build_tts_engine() -> "_pyttsx3.Engine":
+        engine = _pyttsx3.init()
+        engine.setProperty("rate", 150)       # slower = sounds human
+        engine.setProperty("volume", 0.9)     # not blasting
+        # Pick a voice — prefer a female en-US voice on Mac if available
+        voices = engine.getProperty("voices")
+        preferred = None
+        for v in voices:
+            vid = (v.id or "").lower()
+            if "samantha" in vid or ("en_us" in vid and "female" in vid):
+                preferred = v.id
+                break
+        if preferred:
+            engine.setProperty("voice", preferred)
+        return engine
+
+    _TTS_ENGINE = _build_tts_engine()
+    _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+
+    def speak(text: str) -> None:
+        """Speak text locally, pausing 150 ms between sentences."""
+        # Strip markdown-ish noise so NSSpeechSynthesizer doesn't read symbols
+        clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
+        if not clean:
+            return
+        sentences = _SENTENCE_RE.split(clean)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if sentence:
+                _TTS_ENGINE.say(sentence)
+                _TTS_ENGINE.runAndWait()
+                time.sleep(0.15)
+
+    _TTS_AVAILABLE = True
+
+except Exception as _tts_err:
+    _TTS_AVAILABLE = False
+    def speak(text: str) -> None:  # type: ignore[misc]
+        pass
 
 # ── Rich for pretty output (optional) ─────────────────────────────────────────
 try:
@@ -91,8 +137,14 @@ def main() -> None:
 
     print_info(f"Skills loaded: {', '.join(brain.skill_list)}")
     print_info(f"Model: {cfg.llm.ollama_model} | fallback: {cfg.llm.cloud_fallback}")
+    tts_status = "local TTS ready" if _TTS_AVAILABLE else "TTS unavailable"
+    print_info(f"Voice: {tts_status}")
     print_info("Type 'quit' to exit. /skills /memory /reset /reload for controls.")
     print()
+
+    # ── Startup voice check ────────────────────────────────────────────────────
+    if _TTS_AVAILABLE:
+        speak("Hey ARIA. I'm Neo Systems, humming at 100.")
 
     # ── REPL ───────────────────────────────────────────────────────────────────
     skills_dir = Path(__file__).parent / "skills"
@@ -161,6 +213,9 @@ def main() -> None:
                 elif event == "done":
                     response = data
                     print()  # newline after streamed tokens
+                    # Speak the full response locally after streaming finishes
+                    if _TTS_AVAILABLE and response and response.text:
+                        speak(response.text)
 
         except Exception as e:
             print()
