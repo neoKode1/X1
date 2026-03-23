@@ -107,10 +107,13 @@ async def websocket_endpoint(ws: WebSocket):
 
                     # Emit each skill call as an "action" event
                     for call, result in zip(response.skill_calls, response.skill_results):
+                        params = {"name": call.get("name", "unknown"), **call.get("args", {})}
                         await ws.send_text(msg("action", {
-                            "skill": call.get("name", "unknown"),
-                            "args": call.get("args", {}),
-                            "result": result,
+                            "action": {
+                                "type": "SKILL",
+                                "params": params,
+                                "result": result,
+                            }
                         }))
                         await asyncio.sleep(0.05)
 
