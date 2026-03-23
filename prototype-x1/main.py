@@ -17,8 +17,12 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
+
+# Words-per-minute that pyttsx3 is set to — terminal output matches this rate
+SPEECH_WPM = 150
 
 # ── Local TTS (pyttsx3 / NSSpeechSynthesizer on Mac) ─────────────────────────
 try:
@@ -63,6 +67,23 @@ except Exception as _tts_err:
     _TTS_AVAILABLE = False
     def speak(text: str) -> None:  # type: ignore[misc]
         pass
+
+
+def trickle_print(text: str, wpm: int = SPEECH_WPM) -> None:
+    """
+    Print text word-by-word at speech pace so the terminal stays in sync
+    with what ARIA is saying out loud.  Humans read ~150 WPM; so does she.
+    """
+    clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
+    words = clean.split()
+    if not words:
+        return
+    delay = 60.0 / wpm          # seconds per word at target WPM
+    for i, word in enumerate(words):
+        suffix = " " if i < len(words) - 1 else ""
+        print(word + suffix, end="", flush=True)
+        time.sleep(delay)
+    print()                     # final newline
 
 # ── Rich for pretty output (optional) ─────────────────────────────────────────
 try:
@@ -142,19 +163,21 @@ def main() -> None:
     print_info("Type 'quit' to exit. /skills /memory /reset /reload for controls.")
     print()
 
-    # ── Startup voice — check camera, then greet ──────────────────────────────
+    # ── Startup voice — verify engine, check camera, greet ───────────────────
     if _TTS_AVAILABLE:
-        # Probe webcam — silent import, no crash if cv2 missing
+        print("voice engine ready")
+        speak("Hey ARIA, testing voice one two three.")
+
+        # Probe webcam — silent, no crash if cv2 missing
         _cam_live = False
         try:
-            sys.path.insert(0, str(Path(__file__).parent))
             from vision.camera import capture_webcam
             _cam_live = capture_webcam() is not None
         except Exception:
             pass
 
         if _cam_live:
-            speak("Hello. I've got eyes. Let me see something.")
+            speak("Hello. I've got eyes.")
         else:
             speak("Hello.")
 
@@ -200,20 +223,23 @@ def main() -> None:
             print_info(f"Reloaded: {reloaded or 'nothing changed'}")
             continue
 
-        # ── Brain turn (streaming) ─────────────────────────────────────────────
+        # ── Brain turn ────────────────────────────────────────────────────────
+        # Tokens are buffered silently while the LLM generates.
+        # On `done`, speak() fires in a background thread and trickle_print()
+        # releases words at SPEECH_WPM so the terminal stays in sync with voice.
         try:
             skill_calls = []
-            first_token = True
+            token_buf: list[str] = []
             response = None
+
+            print("ARIA: ", end="", flush=True)
 
             for event, data in brain.stream(user_input, speaker="Neokode"):
                 if event == "thinking":
-                    print("ARIA: ", end="", flush=True)
+                    pass  # label already printed above
 
                 elif event == "token":
-                    if first_token:
-                        first_token = False
-                    print(data, end="", flush=True)
+                    token_buf.append(data)   # collect — don't blast yet
 
                 elif event == "action":
                     name = data.get("params", {}).get("name", "?")
@@ -221,13 +247,26 @@ def main() -> None:
                     print()
                     print_info(f"  → [{name}] {result}")
                     skill_calls.append(name)
+                    # Ready to start printing again after the action line
+                    if token_buf:
+                        print("ARIA: ", end="", flush=True)
 
                 elif event == "done":
                     response = data
-                    print()  # newline after streamed tokens
-                    # Speak the full response locally after streaming finishes
-                    if _TTS_AVAILABLE and response and response.text:
-                        speak(response.text)
+                    full_text = "".join(token_buf)
+                    if full_text:
+                        # Speak in background; print at same WPM in foreground
+                        tts_thread: threading.Thread | None = None
+                        if _TTS_AVAILABLE:
+                            tts_thread = threading.Thread(
+                                target=speak, args=(full_text,), daemon=True
+                            )
+                            tts_thread.start()
+                        trickle_print(full_text)
+                        if tts_thread is not None:
+                            tts_thread.join()   # wait for voice before showing YOU:
+                    else:
+                        print()
 
         except Exception as e:
             print()
