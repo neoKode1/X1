@@ -138,7 +138,7 @@ def main() -> None:
 
         # ── Brain turn ─────────────────────────────────────────────────────────
         try:
-            response = brain.process(user_input)
+            response = brain.process(user_input, speaker="Neokode")
         except Exception as e:
             print_err(f"Brain error: {e}")
             if args.debug:
