@@ -42,6 +42,15 @@ def list_skills() -> list[str]:
     return sorted(_registry.keys())
 
 
+def unregister(name: str) -> bool:
+    """Remove a skill from the live registry. Returns True if it existed."""
+    if name in _registry:
+        del _registry[name]
+        log.info("Skill unregistered: %s", name)
+        return True
+    return False
+
+
 def load_skills_dir(skills_dir: Path) -> None:
     """Dynamically load all .py files in skills_dir as skill modules."""
     for path in sorted(skills_dir.glob("*.py")):
