@@ -136,21 +136,44 @@ def main() -> None:
             print_info(f"Reloaded: {reloaded or 'nothing changed'}")
             continue
 
-        # ── Brain turn ─────────────────────────────────────────────────────────
+        # ── Brain turn (streaming) ─────────────────────────────────────────────
         try:
-            response = brain.process(user_input, speaker="Neokode")
+            skill_calls = []
+            first_token = True
+            response = None
+
+            for event, data in brain.stream(user_input, speaker="Neokode"):
+                if event == "thinking":
+                    print("ARIA: ", end="", flush=True)
+
+                elif event == "token":
+                    if first_token:
+                        first_token = False
+                    print(data, end="", flush=True)
+
+                elif event == "action":
+                    name = data.get("params", {}).get("name", "?")
+                    result = data.get("result", "")
+                    print()
+                    print_info(f"  → [{name}] {result}")
+                    skill_calls.append(name)
+
+                elif event == "done":
+                    response = data
+                    print()  # newline after streamed tokens
+
         except Exception as e:
+            print()
             print_err(f"Brain error: {e}")
             if args.debug:
                 import traceback
                 traceback.print_exc()
             continue
 
-        print_aria(response.text)
-
-        if response.skill_calls:
-            print_info(f"  Skills used: {[c['name'] for c in response.skill_calls]}")
-        print_info(f"  [{response.provider} | {response.latency_ms}ms]")
+        if skill_calls:
+            print_info(f"  Skills: {skill_calls}")
+        if response:
+            print_info(f"  [{response.provider} | {response.latency_ms}ms]")
         print()
 
 
