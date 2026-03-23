@@ -131,7 +131,9 @@ _SPEECH_STRIP_RE = re.compile(
     r"|^GPIO:.*$"                          # GPIO: status
     r"|^Relevant memory.*$"               # Relevant memory prepended lines
     r"|\*[^*]+\*"                          # *stage directions*
-    r"|\[[^\]]*hum[^\]]*\]"               # [processing units hum] etc
+    r"|\[[^\]]+\]"                         # [any bracket content] emotes
+    r"|\([^)]{3,80}\)"                     # (parenthetical asides up to 80 chars)
+    r"|(?:^|\s)(?:silence|neural hum|hums?|chuckles? quietly|chuckles?|sighs?|pauses?|whispers?|exhales?|inhales?|laughs?|smiles?)\s*[,.]?"  # bare action words
     r")"
 )
 
