@@ -11,8 +11,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # ── Brain path — prototype-x1 ─────────────────────────────────────────────────
 BRAIN_PATH = Path(__file__).parent.parent / "prototype-x1"
@@ -79,7 +80,8 @@ def status_msg(state: str, extra: dict | None = None) -> str:
     return msg("status", payload)
 
 # ── Streaming bridge: sync generator → async WebSocket ───────────────────────
-async def _stream_brain(ws: WebSocket, brain: Any, user_text: str) -> None:
+async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
+                        speaker: str = "unknown") -> None:
     """Run brain.stream() in a thread and relay events to the WebSocket."""
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
@@ -87,7 +89,7 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str) -> None:
 
     def run_in_thread():
         try:
-            for event in brain.stream(user_text):
+            for event in brain.stream(user_text, speaker=speaker):
                 loop.call_soon_threadsafe(queue.put_nowait, event)
         except Exception as exc:
             loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
@@ -110,6 +112,8 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str) -> None:
             await ws.send_text(msg("token", {"text": data}))
         elif kind == "action":
             await ws.send_text(msg("action", {"action": data}))
+        elif kind == "vision":
+            await ws.send_text(msg("vision", data))
         elif kind == "done":
             br = data  # BrainResponse
             final_response = {
@@ -143,10 +147,11 @@ async def websocket_endpoint(ws: WebSocket):
 
             if data.get("kind") == "command":
                 user_text: str = data["payload"]["text"]
-                log.info("Command received: %s", user_text)
+                speaker: str = data["payload"].get("speaker", "unknown")
+                log.info("Command received: %s (speaker=%s)", user_text, speaker)
 
                 if brain:
-                    await _stream_brain(ws, brain, user_text)
+                    await _stream_brain(ws, brain, user_text, speaker=speaker)
                 else:
                     # Mock mode — brain not available
                     reason = _import_err if not BRAIN_AVAILABLE else "brain init failed"
@@ -171,4 +176,46 @@ async def websocket_endpoint(ws: WebSocket):
 @app.get("/health")
 def health():
     return {"ok": True, "brain_available": BRAIN_AVAILABLE, "uptime_s": int(time.time() - _start_time)}
+
+
+# ── Skill Builder REST API ─────────────────────────────────────────────────────
+SKILLS_DIR = BRAIN_PATH / "skills"
+
+
+class SkillSaveRequest(BaseModel):
+    code: str
+
+
+@app.get("/skills")
+def list_skills():
+    """List all .py skill files in prototype-x1/skills/."""
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(p.name for p in SKILLS_DIR.glob("*.py") if not p.name.startswith("_"))
+    return {"skills": files}
+
+
+@app.post("/skills/{name}")
+def save_skill(name: str, body: SkillSaveRequest):
+    """Save (or overwrite) a skill file and hot-reload it into the brain."""
+    if not name.replace("_", "").isalnum():
+        raise HTTPException(status_code=400, detail="Skill name must be alphanumeric + underscores")
+    if name.startswith("_"):
+        raise HTTPException(status_code=400, detail="Skill name cannot start with underscore")
+
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    skill_path = SKILLS_DIR / f"{name}.py"
+    skill_path.write_text(body.code, encoding="utf-8")
+    log.info("Skill saved: %s (%d bytes)", skill_path, len(body.code))
+
+    # Hot-reload into the running brain
+    brain = get_brain()
+    if brain:
+        try:
+            from brain.skills import load_skill_file  # type: ignore[import]
+            load_skill_file(skill_path)
+            log.info("Hot-reloaded skill: %s", name)
+        except Exception as exc:
+            log.warning("Hot-reload failed for %s: %s", name, exc)
+
+    return {"ok": True, "file": skill_path.name, "bytes": len(body.code)}
 
