@@ -117,7 +117,12 @@ def _kill_active_say() -> None:
     global _active_say_proc
     with _proc_lock:
         if _active_say_proc and _active_say_proc.poll() is None:
-            _active_say_proc.terminate()
+            _active_say_proc.kill()          # SIGKILL — terminate() was too gentle
+            try:
+                _active_say_proc.wait(timeout=1)
+            except Exception:
+                pass
+            _active_say_proc = None
 
 def _speak_sentence(sentence: str, stop: threading.Event) -> None:
     """Speak a single sentence via macOS `say`. Skips if stop is set."""
@@ -491,6 +496,9 @@ async def websocket_endpoint(ws: WebSocket):
         except Exception:
             pass
     finally:
+        # Kill any running TTS so `say` doesn't keep talking after disconnect
+        stop_speaking.set()
+        _kill_active_say()
         if mic_task:
             mic_task.cancel()
         # Stop the mic listener so it can be restarted on next connection
