@@ -24,13 +24,13 @@
   .cursor-blink::after { content: '▊'; animation: pulse 0.8s infinite; color: #facc15; }
   #anim-container {
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-    transition: filter 0.08s ease-out, transform 0.08s ease-out;
+    transition: filter 0.08s ease-out, transform 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
     will-change: transform, filter;
   }
   #voice-glow {
     position: fixed; inset: 0; z-index: 1; pointer-events: none;
     background: radial-gradient(ellipse at 50% 50%, rgba(250,204,21,0.0) 0%, transparent 70%);
-    transition: opacity 0.1s ease-out;
+    transition: opacity 0.15s ease-out, background 0.8s ease;
     opacity: 0;
   }
 </style>
@@ -113,10 +113,18 @@
   }
 
   let smoothVol = 0;
+  // ── State-aware animation ──────────────────────────────────────
+  // States: 'idle' | 'thinking' | 'talking' | 'muted'
+  let ariaState = 'idle';
+  let thinkPulse = 0; // oscillator for thinking brightness
+
+  function setAriaState(newState) {
+    if (ariaState === newState) return;
+    ariaState = newState;
+  }
 
   function audioLoop() {
     const raw = getVolume();
-    // Smooth it — fast attack, slow decay
     smoothVol = raw > smoothVol ? raw * 0.6 + smoothVol * 0.4 : raw * 0.15 + smoothVol * 0.85;
     applyReactivity(smoothVol);
     requestAnimationFrame(audioLoop);
@@ -132,19 +140,62 @@
   }
 
   function applyReactivity(vol) {
-    // Scale: 1.0 → 1.06 at max volume
-    const scale = 1 + vol * 0.06;
-    // Brightness: 1.0 → 1.4 at max
-    const brightness = 1 + vol * 0.4;
-    // Hue shift: subtle color drift when active
-    const hue = vol * 8;
+    thinkPulse += 0.06;
 
-    animContainer.style.transform = `scale(${scale})`;
+    let tx = 0, ty = 0, scale = 1, brightness = 1, hue = 0, glowOpacity = 0, glowColor1, glowColor2;
+
+    switch (ariaState) {
+      case 'thinking':
+        // Drift upper-right, rapid brightness oscillation
+        tx = 6; ty = -5;
+        scale = 1.02 + Math.sin(thinkPulse) * 0.015;
+        brightness = 1.1 + Math.sin(thinkPulse * 2.5) * 0.15;
+        hue = Math.sin(thinkPulse * 0.7) * 12;
+        glowOpacity = 0.18 + Math.sin(thinkPulse * 2) * 0.08;
+        glowColor1 = `rgba(139,92,246,${glowOpacity * 0.5})`;  // purple thinking
+        glowColor2 = `rgba(59,130,246,${glowOpacity * 0.3})`;   // blue accent
+        break;
+
+      case 'talking':
+        // Drift toward bottom-left (near chat), voice-reactive
+        tx = -4; ty = 3;
+        scale = 1 + vol * 0.07;
+        brightness = 1.05 + vol * 0.35;
+        hue = vol * 10;
+        glowOpacity = vol * 0.4;
+        glowColor1 = `rgba(250,204,21,${vol * 0.14})`;   // golden warmth
+        glowColor2 = `rgba(139,92,246,${vol * 0.07})`;    // purple mix
+        break;
+
+      case 'muted':
+        // Dim, retreat to lower-right corner
+        tx = 8; ty = 6;
+        scale = 0.96;
+        brightness = 0.5;
+        hue = -5;
+        glowOpacity = 0;
+        glowColor1 = 'transparent';
+        glowColor2 = 'transparent';
+        break;
+
+      default: // idle
+        // Center, gentle breathing
+        tx = Math.sin(thinkPulse * 0.3) * 1.2;
+        ty = Math.cos(thinkPulse * 0.2) * 0.8;
+        scale = 1 + Math.sin(thinkPulse * 0.5) * 0.008;
+        brightness = 0.95 + Math.sin(thinkPulse * 0.4) * 0.05;
+        hue = 0;
+        glowOpacity = 0.03;
+        glowColor1 = `rgba(250,204,21,0.03)`;
+        glowColor2 = 'transparent';
+        break;
+    }
+
+    animContainer.style.transform = `translate(${tx}%, ${ty}%) scale(${scale})`;
     animContainer.style.filter = `brightness(${brightness}) hue-rotate(${hue}deg)`;
 
-    // Glow overlay — golden pulse
-    voiceGlow.style.opacity = vol * 0.35;
-    voiceGlow.style.background = `radial-gradient(ellipse at 50% 50%, rgba(250,204,21,${vol * 0.12}) 0%, rgba(139,92,246,${vol * 0.06}) 40%, transparent 70%)`;
+    voiceGlow.style.opacity = glowOpacity;
+    voiceGlow.style.background = `radial-gradient(ellipse at 50% 50%, ${glowColor1} 0%, ${glowColor2} 40%, transparent 70%)`;
   }
 
   // Init audio on first click (browser requires user gesture)
@@ -174,6 +225,7 @@
       case 'thinking':
         streamEl = addMsg('aria', '');
         streamEl.querySelector('.text').classList.add('cursor-blink');
+        setAriaState('thinking');
         break;
       case 'token': {
         const t = msg.payload?.text || '';
@@ -184,6 +236,8 @@
         scrollChat();
         // Kick fallback energy on token flow
         if (!audioInitialized) fallbackEnergy = Math.min(fallbackEnergy + 0.08, 0.5);
+        // Transition from thinking to talking once tokens flow
+        if (ariaState === 'thinking') setAriaState('talking');
         break;
       }
       case 'response': {
@@ -202,11 +256,17 @@
         break;
       case 'tts':
         isSpeaking = !!msg.payload?.speaking;
+        if (isSpeaking) setAriaState('talking');
         break;
       case 'status':
         if (msg.payload?.paused !== undefined) {
           muted = msg.payload.paused;
           showMuteState();
+          if (muted) { setAriaState('muted'); }
+          else { setAriaState('idle'); }
+        } else {
+          // status kind without paused = state update (e.g. idle)
+          if (!muted) setAriaState('idle');
         }
         break;
     }
@@ -234,6 +294,7 @@
     muted = !muted;
     ws.send(JSON.stringify({ kind: muted ? 'pause' : 'resume', ts: Date.now() }));
     showMuteState();
+    setAriaState(muted ? 'muted' : 'idle');
   }
 
   function showMuteState() {
