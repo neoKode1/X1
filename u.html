@@ -1,0 +1,158 @@
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARIA</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: 0.03;
+    pointer-events: none;
+    z-index: 9999;
+    mix-blend-mode: overlay;
+  }
+  #chat-log { scrollbar-width: none; }
+  #chat-log::-webkit-scrollbar { display: none; }
+  .msg { animation: fadeIn 0.3s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
+  #mute-indicator { transition: opacity 0.3s; }
+  .cursor-blink::after { content: '▊'; animation: pulse 0.8s infinite; color: #facc15; }
+</style>
+</head>
+
+<body class="m-0 w-screen h-screen overflow-hidden bg-[#050510] cursor-pointer select-none" onclick="toggleMute()">
+
+  <!-- Fullscreen Animation Container -->
+  <div data-us-project="lmSXlfVhWVrbN3qzElFu" data-us-scale="1" data-us-dpi="1.5" data-us-fps="60" data-us-lazyload="true" data-us-production="true" role="img" aria-label="Animated 3D background" style="position:absolute;top:0;left:0;width:100%;height:100%;"></div>
+
+  <!-- Mute indicator — top center -->
+  <div id="mute-indicator" style="position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:100;opacity:0;pointer-events:none;">
+    <span id="mute-label" style="font-family:monospace;font-size:14px;color:#facc15;background:rgba(0,0,0,0.5);padding:4px 14px;border-radius:20px;backdrop-filter:blur(8px);"></span>
+  </div>
+
+  <!-- Chat overlay — bottom left -->
+  <div id="chat-log" style="position:fixed;bottom:24px;left:24px;right:24px;max-height:40vh;overflow-y:auto;z-index:100;display:flex;flex-direction:column;gap:6px;pointer-events:none;"></div>
+
+  <!-- Connection dot — top left -->
+  <div id="conn-dot" style="position:fixed;top:16px;left:16px;z-index:100;display:flex;align-items:center;gap:6px;pointer-events:none;">
+    <span id="dot" style="width:8px;height:8px;border-radius:50%;background:#f87171;display:inline-block;"></span>
+    <span id="conn-text" style="font-family:monospace;font-size:11px;color:#475569;"></span>
+  </div>
+
+  <!-- Unicorn Studio SDK -->
+  <script>
+  !function(){var u=window.UnicornStudio;if(u&&u.init){u.init()}else{var d=document,s=d.createElement("script");s.src="https://cdn.jsdelivr.net/gh/hiunicornstudio/unicornstudio.js@v2.1.3/dist/unicornStudio.umd.js";s.onload=function(){window.UnicornStudio&&window.UnicornStudio.init()};(d.head||d.body).appendChild(s)}}();
+  </script>
+
+  <script>
+  const WS_URL = 'ws://localhost:8000/ws';
+  let ws = null;
+  let muted = false;
+  let reconnectTimer = null;
+
+  const chatLog = document.getElementById('chat-log');
+  const muteIndicator = document.getElementById('mute-indicator');
+  const muteLabel = document.getElementById('mute-label');
+  const dot = document.getElementById('dot');
+  const connText = document.getElementById('conn-text');
+  let streamEl = null; // current streaming ARIA message element
+
+  function connect() {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => {
+      dot.style.background = '#4ade80';
+      connText.textContent = '';
+      clearTimeout(reconnectTimer);
+    };
+    ws.onclose = () => {
+      dot.style.background = '#f87171';
+      connText.textContent = 'reconnecting…';
+      streamEl = null;
+      reconnectTimer = setTimeout(connect, 2000);
+    };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (e) => {
+      try { dispatch(JSON.parse(e.data)); } catch {}
+    };
+  }
+
+  function dispatch(msg) {
+    switch (msg.kind) {
+      case 'thinking':
+        streamEl = addMsg('aria', '');
+        streamEl.querySelector('.text').classList.add('cursor-blink');
+        break;
+      case 'token': {
+        const t = msg.payload?.text || '';
+        if (!streamEl) { streamEl = addMsg('aria', ''); }
+        const span = streamEl.querySelector('.text');
+        span.classList.add('cursor-blink');
+        span.textContent += t;
+        scrollChat();
+        break;
+      }
+      case 'response': {
+        if (streamEl) {
+          const span = streamEl.querySelector('.text');
+          span.textContent = msg.payload?.text || '';
+          span.classList.remove('cursor-blink');
+          streamEl = null;
+        } else if (msg.payload?.text) {
+          addMsg('aria', msg.payload.text);
+        }
+        break;
+      }
+      case 'mic':
+        if (msg.payload?.text) addMsg('user', msg.payload.text);
+        break;
+      case 'tts':
+        break;
+      case 'status':
+        if (msg.payload?.paused !== undefined) {
+          muted = msg.payload.paused;
+          showMuteState();
+        }
+        break;
+    }
+  }
+
+  function addMsg(role, text) {
+    const div = document.createElement('div');
+    div.className = 'msg';
+    const color = role === 'aria' ? '#e2e8f0' : '#94a3b8';
+    const prefix = role === 'aria' ? '' : '🎙 ';
+    div.innerHTML = `<span style="font-family:monospace;font-size:13px;color:${color};background:rgba(0,0,0,0.4);padding:3px 10px;border-radius:8px;display:inline-block;max-width:80vw;backdrop-filter:blur(6px);line-height:1.5;"><span class="text">${prefix}${text}</span></span>`;
+    chatLog.appendChild(div);
+    // Keep max 30 messages
+    while (chatLog.children.length > 30) chatLog.removeChild(chatLog.firstChild);
+    scrollChat();
+    return div;
+  }
+
+  function scrollChat() {
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function toggleMute() {
+    if (!ws || ws.readyState !== 1) return;
+    muted = !muted;
+    ws.send(JSON.stringify({ kind: muted ? 'pause' : 'resume', ts: Date.now() }));
+    showMuteState();
+  }
+
+  function showMuteState() {
+    muteLabel.textContent = muted ? '🔇 muted' : '🎙 listening';
+    muteIndicator.style.opacity = '1';
+    setTimeout(() => { muteIndicator.style.opacity = '0'; }, 1800);
+  }
+
+  connect();
+  </script>
+
+</body>
+</html>
