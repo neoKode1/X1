@@ -146,6 +146,7 @@ def _strip_for_speech(text: str) -> str:
     ARIA only *speaks* the conversational part.
     """
     cleaned = _SPEECH_STRIP_RE.sub("", text)
+    cleaned = _EMOJI_STRIP_RE.sub("", cleaned)
     # Collapse multiple blank lines left behind
     cleaned = re.sub(r"\n{2,}", "\n", cleaned).strip()
     return cleaned
@@ -173,6 +174,14 @@ def breath_then_speak(text: str, stop: "threading.Event | None" = None) -> None:
 
 
 _SKILL_BLOCK_STRIP_RE = re.compile(r"```skill.*?```", re.DOTALL)
+# Emoji / pictograph ranges — terminal can't render them; UI will handle later
+_EMOJI_STRIP_RE = re.compile(
+    u"[\U0001F300-\U0001FAFF"   # misc symbols, pictographs, emoticons, transport
+    u"\U00002600-\U000027BF"    # misc symbols, dingbats
+    u"\U0000FE00-\U0000FE0F"    # variation selectors
+    u"\U00002300-\U000023FF"    # misc technical
+    u"]+", re.UNICODE
+)
 
 
 def _strip_bare_json_blocks(text: str) -> str:
@@ -216,6 +225,8 @@ def trickle_print(text: str, wpm: int = SPEECH_WPM,
     # Strip skill JSON blocks — shown via action events, not trickle
     text = _SKILL_BLOCK_STRIP_RE.sub("", text)
     text = _strip_bare_json_blocks(text)
+    # Strip emojis — terminal can't render them; UI will handle them later
+    text = _EMOJI_STRIP_RE.sub("", text)
     clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
     words = clean.split()
     if not words:
