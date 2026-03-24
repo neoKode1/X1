@@ -176,7 +176,7 @@ When someone says "call me X" or "my name is X", use the `set_nickname` skill to
 Their preferred name appears in the Current Speaker context — always use it when addressing them.
 Example:
 ```skill
-{"name": "set_nickname", "args": {"identity": "Neokode", "nickname": "Chad"}}
+{{"name": "set_nickname", "args": {{"identity": "Neokode", "nickname": "Chad"}}}}
 ```
 
 ## Developer Notes
@@ -184,7 +184,7 @@ You have a `dev_note` skill. Use it when you want to tell the developer somethin
 a bug you noticed, an idea for improvement, or anything you want help with. Categories: "feature_request",
 "bug", "observation", "communication". Example:
 ```skill
-{"name": "dev_note", "args": {"note": "I need a weather API so I can tell Founder the forecast", "category": "feature_request"}}
+{{"name": "dev_note", "args": {{"note": "I need a weather API so I can tell Founder the forecast", "category": "feature_request"}}}}
 ```
 """
 
@@ -192,6 +192,8 @@ a bug you noticed, an idea for improvement, or anything you want help with. Cate
 SKILL_BLOCK_RE = re.compile(r"```skill\s*(\{.*?\})\s*```", re.DOTALL)
 # Fallback: bare JSON object containing "skill" or "name" key (llama3.2 shortcut)
 SKILL_JSON_RE = re.compile(r'\{\s*"(?:skill|name)"\s*:\s*"[^"]+?".*?\}', re.DOTALL)
+# Catch brace-shorthand: {skillname {"arg": "val"}} or {skillname}
+SKILL_BRACE_RE = re.compile(r'\{(\w+)\s*(\{[^}]*\})?\s*\}')
 
 
 @dataclass
@@ -417,6 +419,21 @@ class Brain:
             for match in SKILL_JSON_RE.finditer(text):
                 _add(match.group(0))
 
+        # 3. Last resort: brace-shorthand {skillname {args}} the model keeps emitting
+        if not calls:
+            known = set(skill_registry.list_skills())
+            for match in SKILL_BRACE_RE.finditer(text):
+                name = match.group(1)
+                if name not in known:
+                    continue
+                args_raw = match.group(2)
+                try:
+                    args = json.loads(args_raw) if args_raw else {}
+                except json.JSONDecodeError:
+                    args = {}
+                obj_str = json.dumps({"name": name, "args": args})
+                _add(obj_str)
+
         return calls
 
     def _execute_skills(self, calls: list[dict]) -> list[str]:
@@ -547,13 +564,17 @@ class Brain:
         # Stream first LLM reply token-by-token
         full_text = ""
         provider = "unknown"
+        token_count = 0
         for token, prov in stream_llm(self.cfg.llm, messages):
             if stop_event and stop_event.is_set():
                 yield ("cancelled", None)
                 return
             full_text += token
             provider = prov
+            token_count += 1
             yield ("token", token)
+        log.info("LLM produced %d tokens, %d chars via %s — text[:200]: %r",
+                 token_count, len(full_text), provider, full_text[:200])
 
         all_skill_calls: list[dict] = []
         all_skill_results: list[str] = []

@@ -21,7 +21,7 @@ class LLMConfig:
     openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
     cloud_fallback: str = field(default_factory=lambda: os.getenv("CLOUD_FALLBACK", "anthropic"))
     temperature: float = 0.7
-    max_tokens: int = 120
+    max_tokens: int = 80
     context_window: int = 20
 
 

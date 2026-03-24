@@ -25,7 +25,11 @@ _HALLUCINATION_PHRASES = {
     "thank you for watching", "you got poop", "i'm not a fool",
     "please subscribe", "see you next time", "bye bye",
     "subs by", "subtitles by", "amara.org", "you",
+    "i'm sorry", "birth certificate", "taxid", "tax id",
+    "i'm going to be a physician", "i'm not going to be a",
 }
+
+import re as _re
 
 def _is_hallucination(text: str) -> bool:
     """Reject known Whisper hallucination patterns."""
@@ -41,6 +45,23 @@ def _is_hallucination(text: str) -> bool:
     words = t.split()
     if len(words) >= 3 and len(set(words)) == 1:
         return True
+    # Reject repeated phrases: "I'm sorry. I'm sorry. I'm sorry."
+    # Split on sentence boundaries and check for repeated sentences
+    sentences = [s.strip().rstrip(".!?").strip() for s in _re.split(r'[.!?]+', t) if s.strip()]
+    if len(sentences) >= 2:
+        unique = set(sentences)
+        if len(unique) == 1:
+            return True
+        # >60% of sentences are the same phrase — likely hallucination
+        from collections import Counter
+        counts = Counter(sentences)
+        most_common_count = counts.most_common(1)[0][1]
+        if most_common_count / len(sentences) > 0.6:
+            return True
+    # Reject if >70% of words are unique but the text makes no coherent sense
+    # (heuristic: very long transcriptions from silence tend to be nonsensical)
+    if len(words) > 15 and len(sentences) >= 3:
+        return True  # ambient noise rarely produces 15+ real words
     return False
 
 
@@ -52,7 +73,7 @@ def _fmt_dur(seconds: float) -> str:
 class MicListener:
     """Stream mic audio, detect utterances, transcribe, yield text."""
 
-    def __init__(self, model_size: str = "tiny") -> None:
+    def __init__(self, model_size: str = "base") -> None:
         self._model_size = model_size
         self._model = None
         self._q: queue.Queue[np.ndarray] = queue.Queue()
@@ -66,13 +87,47 @@ class MicListener:
             self._model = WhisperModel(self._model_size, device="cpu", compute_type="int8")
             log.info("Whisper ready.")
 
+    # Domain vocabulary for Whisper initial_prompt bias
+    _VOCAB_PROMPT = (
+        "ARIA, Vibcoder, Neokode, Chad, BCS, cyberpunk, mods, "
+        "screengrab, Ollama, Llama, prototype, locomotion, "
+        "Raspberry Pi, servo, actuator, neural, chassis"
+    )
+
+    # Post-processing corrections for common Whisper mishearings
+    _WORD_CORRECTIONS = {
+        "mim coder": "Vibcoder", "mim coater": "Vibcoder",
+        "vibe coder": "Vibcoder", "vib coder": "Vibcoder",
+        "vibecoder": "Vibcoder", "vibecoda": "Vibcoder",
+        "iapx": "Vibcoder", "vip coder": "Vibcoder",
+        "vim coder": "Vibcoder", "by coder": "Vibcoder",
+        "aria": "ARIA", "arya": "ARIA", "area": "ARIA",
+        "neo code": "Neokode", "neo kode": "Neokode",
+        "neocode": "Neokode",
+    }
+
+    def _post_correct(self, text: str) -> str:
+        """Fix common Whisper mishearings via case-insensitive replacement."""
+        result = text
+        lower = result.lower()
+        for wrong, right in self._WORD_CORRECTIONS.items():
+            idx = lower.find(wrong)
+            while idx != -1:
+                result = result[:idx] + right + result[idx + len(wrong):]
+                lower = result.lower()
+                idx = lower.find(wrong, idx + len(right))
+        return result
+
     def _transcribe(self, audio: np.ndarray) -> str:
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            segments, _ = self._model.transcribe(audio, language="en", beam_size=1)
+            segments, _ = self._model.transcribe(
+                audio, language="en", beam_size=3,
+                initial_prompt=self._VOCAB_PROMPT,
+            )
             text = " ".join(s.text for s in segments).strip()
-        return text
+        return self._post_correct(text)
 
     def _mic_callback(self, indata, frames, time, status) -> None:
         if status:
