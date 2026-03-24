@@ -168,6 +168,14 @@ All other skills: {skill_list}
 ## Memory
 Relevant past memories are prepended automatically. Use them silently — do not repeat or quote them back.
 
+## Nicknames / Preferred Names
+When someone says "call me X" or "my name is X", use the `set_nickname` skill to remember it.
+Their preferred name appears in the Current Speaker context — always use it when addressing them.
+Example:
+```skill
+{"name": "set_nickname", "args": {"identity": "Neokode", "nickname": "Chad"}}
+```
+
 ## Developer Notes
 You have a `dev_note` skill. Use it when you want to tell the developer something — a feature you need,
 a bug you noticed, an idea for improvement, or anything you want help with. Categories: "feature_request",
@@ -257,9 +265,15 @@ class Brain:
                 return "No friends registered yet."
             return "Friends: " + ", ".join(friends)
 
+        def set_nickname(identity: str, nickname: str) -> str:
+            """Set a preferred name for someone. Use when they say 'call me X'."""
+            trust.set_nickname(identity, nickname)
+            return f"✓ Will now call {identity} by their preferred name: {nickname}"
+
         skill_registry.register("introduce_friend", introduce_friend, override=True)
         skill_registry.register("revoke_friend",    revoke_friend,    override=True)
         skill_registry.register("list_friends",     list_friends,     override=True)
+        skill_registry.register("set_nickname",     set_nickname,     override=True)
 
     def _register_bcs_skills(self) -> None:
         """Register BCS query and update skills."""
@@ -329,9 +343,9 @@ class Brain:
 
     # Skills exempt from BCS fail-tracking (management / infrastructure)
     _BCS_EXEMPT = frozenset({
-        "introduce_friend", "revoke_friend", "list_friends",
+        "introduce_friend", "revoke_friend", "list_friends", "set_nickname",
         "bcs_report", "bcs_advance", "scrap_report",
-        "speak", "led",
+        "speak", "led", "dev_note", "read_dev_notes", "clear_dev_notes",
     })
 
     def _build_messages(self, user_input: str, recalled: list,

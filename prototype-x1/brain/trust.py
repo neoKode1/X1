@@ -29,6 +29,7 @@ _FOUNDERS: frozenset[str] = frozenset({"neokode", "neocode"})
 _PEERS: frozenset[str] = frozenset({"backup_001"})
 
 REGISTRY_PATH = Path(__file__).parent.parent / "memory" / "trust.json"
+NICKNAMES_PATH = Path(__file__).parent.parent / "memory" / "nicknames.json"
 
 
 class Tier(IntEnum):
@@ -50,9 +51,12 @@ class TrustEntry:
 class TrustRegistry:
     """Persistent trust registry for ARIA's social model."""
 
-    def __init__(self, path: Path = REGISTRY_PATH) -> None:
+    def __init__(self, path: Path = REGISTRY_PATH,
+                 nicknames_path: Path = NICKNAMES_PATH) -> None:
         self.path = path
+        self._nicknames_path = nicknames_path
         self._friends: dict[str, TrustEntry] = {}
+        self._nicknames: dict[str, str] = {}  # identity_key → preferred name
         self._load()
 
     # ── Persistence ──────────────────────────────────────────────────────────
@@ -65,12 +69,23 @@ class TrustRegistry:
                 log.info("Trust registry: %d friend(s) loaded", len(self._friends))
             except Exception as exc:
                 log.warning("Trust registry load failed: %s", exc)
+        if self._nicknames_path.exists():
+            try:
+                self._nicknames = json.loads(self._nicknames_path.read_text())
+                if self._nicknames:
+                    log.info("Nicknames loaded: %s", self._nicknames)
+            except Exception:
+                pass
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps({k: asdict(v) for k, v in self._friends.items()}, indent=2)
         )
+
+    def _save_nicknames(self) -> None:
+        self._nicknames_path.parent.mkdir(parents=True, exist_ok=True)
+        self._nicknames_path.write_text(json.dumps(self._nicknames, indent=2))
 
     # ── Tier resolution ──────────────────────────────────────────────────────
 
@@ -94,14 +109,29 @@ class TrustRegistry:
     def describe(self, name: str) -> str:
         key = name.strip().lower()
         tier = self.get_tier(name)
+        nick = self._nicknames.get(key)
+        nick_line = f" Preferred name: \"{nick}\" — always call them {nick}." if nick else ""
         if tier == Tier.FOUNDER:
-            return f"{name} is the Founder — full authority."
+            return f"{name} is the Founder — full authority.{nick_line}"
         if key in _PEERS:
-            return f"{name} is a pre-authorized Peer node — Friend tier."
+            return f"{name} is a pre-authorized Peer node — Friend tier.{nick_line}"
         if tier == Tier.FRIEND:
             e = self._friends[key]
-            return f"{name} is a Friend (introduced by {e.introduced_by})."
-        return f"{name} is Unknown — restricted to basic conversation."
+            return f"{name} is a Friend (introduced by {e.introduced_by}).{nick_line}"
+        return f"{name} is Unknown — restricted to basic conversation.{nick_line}"
+
+    # ── Nicknames ─────────────────────────────────────────────────────────────
+
+    def set_nickname(self, identity: str, nickname: str) -> None:
+        """Set a preferred name for a person. Persists across sessions."""
+        key = identity.strip().lower()
+        self._nicknames[key] = nickname
+        self._save_nicknames()
+        log.info("Nickname set: %s → %s", identity, nickname)
+
+    def get_nickname(self, identity: str) -> str | None:
+        """Get the preferred name for a person, or None."""
+        return self._nicknames.get(identity.strip().lower())
 
     # ── Mutation ─────────────────────────────────────────────────────────────
 
