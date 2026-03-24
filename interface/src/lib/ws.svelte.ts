@@ -1,7 +1,7 @@
 import type {
   WsMessage, ChatEntry, ActionLogEntry,
   TokenPayload, ResponsePayload, ActionPayload,
-  VisionPayload, StatusPayload
+  VisionPayload, StatusPayload, MicPayload, TtsPayload
 } from './types.js';
 
 const WS_URL = 'ws://localhost:8000/ws';
@@ -17,6 +17,10 @@ export const model = $state({ value: '—' });
 export const chat = $state<ChatEntry[]>([]);
 export const actionLog = $state<ActionLogEntry[]>([]);
 export const visionFrame = $state({ src: '', description: '', source: '' });
+export const micAvailable = $state({ value: false });
+export const ttsAvailable = $state({ value: false });
+export const ttsSpeaking = $state({ value: false });
+export const paused = $state({ value: false });
 
 // ── WebSocket singleton ───────────────────────────────────────────────────────
 let socket: WebSocket | null = null;
@@ -28,11 +32,13 @@ function dispatch(msg: WsMessage) {
       const p = msg.payload as StatusPayload;
       brainState.value = p.state;
       model.value = p.model;
+      if (p.mic !== undefined) micAvailable.value = p.mic;
+      if (p.tts !== undefined) ttsAvailable.value = p.tts;
+      if (p.paused !== undefined) paused.value = p.paused;
       break;
     }
     case 'thinking': {
       brainState.value = 'thinking';
-      // Ensure there's an in-progress ARIA entry
       const last = chat.at(-1);
       if (!last || last.role !== 'aria' || !last.streaming) {
         chat.push({ id: uid(), role: 'aria', text: '', streaming: true, ts: msg.ts });
@@ -73,6 +79,16 @@ function dispatch(msg: WsMessage) {
       visionFrame.source = p.source;
       break;
     }
+    case 'mic': {
+      const p = msg.payload as MicPayload;
+      chat.push({ id: uid(), role: 'user', text: `🎙 ${p.text}`, streaming: false, ts: msg.ts });
+      break;
+    }
+    case 'tts': {
+      const p = msg.payload as TtsPayload;
+      ttsSpeaking.value = p.speaking;
+      break;
+    }
     case 'error': {
       brainState.value = 'error';
       break;
@@ -106,7 +122,24 @@ function connect() {
 export function sendCommand(text: string) {
   if (!socket || socket.readyState !== 1) return;
   chat.push({ id: uid(), role: 'user', text, streaming: false, ts: Date.now() });
-  socket.send(JSON.stringify({ kind: 'command', payload: { text }, ts: Date.now() }));
+  socket.send(JSON.stringify({ kind: 'command', payload: { text, speaker: 'Neokode' }, ts: Date.now() }));
+}
+
+export function sendPause() {
+  if (!socket || socket.readyState !== 1) return;
+  paused.value = true;
+  socket.send(JSON.stringify({ kind: 'pause', ts: Date.now() }));
+}
+
+export function sendResume() {
+  if (!socket || socket.readyState !== 1) return;
+  paused.value = false;
+  socket.send(JSON.stringify({ kind: 'resume', ts: Date.now() }));
+}
+
+export function togglePause() {
+  if (paused.value) sendResume();
+  else sendPause();
 }
 
 export function initWs() { connect(); }

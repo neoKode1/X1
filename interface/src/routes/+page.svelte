@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { connected, brainState, model, chat, actionLog, visionFrame, sendCommand } from '$lib/ws.svelte.js';
+  import { connected, brainState, model, chat, actionLog, visionFrame, sendCommand, micAvailable, ttsAvailable, ttsSpeaking, paused, togglePause } from '$lib/ws.svelte.js';
 
   let input = $state('');
 
@@ -93,6 +93,18 @@
   <span class="conn" class:online={connected.value}>
     {connected.value ? '● connected' : '○ connecting…'}
   </span>
+  {#if micAvailable.value}
+    <span class="dim sep">|</span>
+    <span class="mic-indicator" class:active={!paused.value}>
+      {paused.value ? '🔇 mic paused' : '🎙 listening'}
+    </span>
+  {/if}
+  {#if ttsAvailable.value}
+    <span class="dim sep">|</span>
+    <span class="tts-indicator" class:speaking={ttsSpeaking.value}>
+      {ttsSpeaking.value ? '🔊 speaking' : '🔈 TTS ready'}
+    </span>
+  {/if}
 </header>
 
 <!-- Main layout -->
@@ -114,6 +126,15 @@
       {/if}
     </div>
     <div class="chat-input-row">
+      <button
+        class="pause-btn"
+        class:active={paused.value}
+        onclick={togglePause}
+        disabled={!connected.value}
+        title={paused.value ? 'Resume ARIA' : 'Pause ARIA — stops speech, keeps mic open'}
+      >
+        {paused.value ? '▶' : '⏸'}
+      </button>
       <textarea
         class="cmd-input"
         rows="2"
@@ -217,6 +238,10 @@
   .state-label { font-weight: 600; letter-spacing: 1px; font-size: 11px; }
   .conn { color: #f87171; }
   .conn.online { color: #4ade80; }
+  .mic-indicator { color: #475569; font-size: 12px; }
+  .mic-indicator.active { color: #4ade80; }
+  .tts-indicator { color: #475569; font-size: 12px; }
+  .tts-indicator.speaking { color: #facc15; }
 
   main.grid { display: grid; grid-template-columns: 1fr 380px; gap: 12px; padding: 12px; height: calc(100dvh - 41px); overflow: hidden; }
 
@@ -235,6 +260,10 @@
   .msg { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
   .placeholder { color: #334155; font-style: italic; padding: 8px; }
 
+  .pause-btn { background: #1e2330; border: 1px solid #334155; border-radius: 6px; color: #94a3b8; cursor: pointer; font-size: 18px; width: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+  .pause-btn:hover:not(:disabled) { background: #2d3748; color: #facc15; border-color: #facc15; }
+  .pause-btn.active { background: #422006; color: #facc15; border-color: #facc15; }
+  .pause-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .chat-input-row { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #1e2330; flex-shrink: 0; }
   .cmd-input { flex: 1; background: #0d0f14; border: 1px solid #1e2330; border-radius: 6px; color: #e2e8f0; padding: 8px 10px; font-family: inherit; font-size: 13px; resize: none; outline: none; }
   .cmd-input:focus { border-color: #3b82f6; }

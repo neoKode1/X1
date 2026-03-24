@@ -9,7 +9,7 @@ export interface BrainAction {
 }
 
 export interface WsMessage {
-  kind: 'token' | 'response' | 'action' | 'vision' | 'error' | 'status' | 'thinking';
+  kind: 'token' | 'response' | 'action' | 'vision' | 'error' | 'status' | 'thinking' | 'mic' | 'tts';
   payload: unknown;
   ts: number; // unix ms
 }
@@ -37,10 +37,21 @@ export interface StatusPayload {
   state: 'idle' | 'thinking' | 'acting' | 'error';
   model: string;
   uptime_s: number;
+  mic?: boolean;
+  tts?: boolean;
+  paused?: boolean;
 }
 
 export interface ErrorPayload {
   message: string;
+}
+
+export interface MicPayload {
+  text: string;
+}
+
+export interface TtsPayload {
+  speaking: boolean;
 }
 
 // Chat entry in the UI log
