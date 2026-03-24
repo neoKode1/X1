@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import queue
 import re
 import sys
 import threading
@@ -54,6 +55,8 @@ def _kill_active_say() -> None:
 
 if _shutil.which("say"):
     # macOS — subprocess `say`, works from any thread
+    _SAY_RATE = "210"  # WPM — 150 was sluggish, 210 feels natural-fast
+
     def speak(text: str, stop: "threading.Event | None" = None) -> None:
         global _active_say_proc
         clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
@@ -65,7 +68,7 @@ if _shutil.which("say"):
                 continue
             if stop and stop.is_set():
                 return
-            proc = _subprocess.Popen(["say", "-r", "150", sentence])
+            proc = _subprocess.Popen(["say", "-r", _SAY_RATE, sentence])
             with _proc_lock:
                 _active_say_proc = proc
             proc.wait()
@@ -73,7 +76,20 @@ if _shutil.which("say"):
                 _active_say_proc = None
             if stop and stop.is_set():
                 return
-            time.sleep(0.15)
+            time.sleep(0.08)  # tighter gap between sentences
+
+    def speak_sentence(sentence: str, stop: "threading.Event | None" = None) -> None:
+        """Speak a single sentence immediately. Used for streaming TTS."""
+        global _active_say_proc
+        sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
+        if not sentence or (stop and stop.is_set()):
+            return
+        proc = _subprocess.Popen(["say", "-r", _SAY_RATE, sentence])
+        with _proc_lock:
+            _active_say_proc = proc
+        proc.wait()
+        with _proc_lock:
+            _active_say_proc = None
 
     _TTS_AVAILABLE = True
 
@@ -96,11 +112,19 @@ else:
                     _TTS_ENGINE.runAndWait()
                     time.sleep(0.15)
 
+        def speak_sentence(sentence: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
+            sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
+            if sentence and not (stop and stop.is_set()):
+                _TTS_ENGINE.say(sentence)
+                _TTS_ENGINE.runAndWait()
+
         _TTS_AVAILABLE = True
 
     except Exception:
         _TTS_AVAILABLE = False
         def speak(text: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
+            pass
+        def speak_sentence(sentence: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
             pass
 
 
@@ -400,15 +424,38 @@ def main() -> None:
             continue
 
         # ── Brain turn ────────────────────────────────────────────────────────
-        # Tokens are buffered silently while the LLM generates.
-        # On `done`, speak() fires in a background thread and trickle_print()
-        # releases words at SPEECH_WPM so the terminal stays in sync with voice.
+        # Tokens stream to terminal live. Sentences queue for TTS as they
+        # complete mid-stream — she starts talking before the LLM finishes.
+        # Ctrl+C interrupts speech immediately.
         try:
             skill_calls = []
             token_buf: list[str] = []
             response = None
             _brace_depth = 0       # tracks { } nesting to suppress skill JSON
             _in_fence = False      # tracks ```skill fences
+            _sentence_buf: list[str] = []  # accumulates clean chars for TTS
+            _tts_queue: "queue.Queue[str | None]" = queue.Queue()
+
+            # TTS worker — reads sentences from queue, speaks them in order
+            def _tts_worker():
+                if _mic_listener is not None:
+                    _mic_listener.muted.set()
+                while True:
+                    sentence = _tts_queue.get()
+                    if sentence is None:  # poison pill
+                        break
+                    if _stop_speaking.is_set():
+                        continue  # drain queue without speaking
+                    speak_sentence(sentence, _stop_speaking)
+                if _mic_listener is not None:
+                    time.sleep(0.3)
+                    _mic_listener.muted.clear()
+
+            _stop_speaking.clear()
+            tts_thread: threading.Thread | None = None
+            if _TTS_AVAILABLE:
+                tts_thread = threading.Thread(target=_tts_worker, daemon=True)
+                tts_thread.start()
 
             print("ARIA: ", end="", flush=True)
 
@@ -435,8 +482,16 @@ def main() -> None:
                             if ch == '}':
                                 _brace_depth -= 1
                             continue  # suppress everything inside { }
-                        # Print clean characters immediately
+                        # Print clean character immediately
                         print(ch, end="", flush=True)
+                        # Accumulate for TTS — flush on sentence boundaries
+                        _sentence_buf.append(ch)
+                        if ch in '.!?' and len(_sentence_buf) > 3:
+                            sentence = "".join(_sentence_buf).strip()
+                            sentence = _strip_banned(sentence)
+                            if sentence:
+                                _tts_queue.put(sentence)
+                            _sentence_buf.clear()
 
                 elif event == "action":
                     name = data.get("params", {}).get("name", "?")
@@ -445,47 +500,45 @@ def main() -> None:
                     print_info(f"  → [{name}] {result}")
                     skill_calls.append(name)
                     print("ARIA: ", end="", flush=True)
-                    _in_skill_block = False
+                    _sentence_buf.clear()
 
                 elif event == "done":
                     response = data
+                    # Flush any remaining sentence fragment to TTS
+                    leftover = "".join(_sentence_buf).strip()
+                    leftover = _strip_banned(leftover)
+                    if leftover:
+                        _tts_queue.put(leftover)
+                    _tts_queue.put(None)  # signal TTS worker to exit
                     full_text = "".join(token_buf)
                     if args.debug:
                         print(f"\n[DEBUG raw] {repr(full_text)}", flush=True)
-                    print(flush=True)  # final newline after streamed tokens
-                    if full_text:
-                        # ── TTS — fire immediately, no delays ──
-                        _stop_speaking.clear()
-                        if _mic_listener is not None:
-                            _mic_listener.muted.set()
-                        tts_thread: threading.Thread | None = None
-                        if _TTS_AVAILABLE:
-                            speech_text = _strip_banned(_strip_for_speech(full_text))
-                            if speech_text:
-                                tts_thread = threading.Thread(
-                                    target=breath_then_speak,
-                                    args=(speech_text, _stop_speaking),
-                                    daemon=True,
-                                )
-                                tts_thread.start()
+                    print(flush=True)  # final newline
+                    # Wait for TTS to finish (interruptible)
+                    if tts_thread is not None:
                         try:
-                            # Wait for TTS to finish (interruptible)
-                            if tts_thread is not None:
-                                while tts_thread.is_alive():
-                                    try:
-                                        tts_thread.join(timeout=0.2)
-                                    except KeyboardInterrupt:
-                                        _stop_speaking.set()
-                                        _kill_active_say()
-                                        break
-                        finally:
+                            while tts_thread.is_alive():
+                                tts_thread.join(timeout=0.2)
+                        except KeyboardInterrupt:
                             _stop_speaking.set()
-                            if tts_thread is not None:
-                                tts_thread.join(timeout=1)
-                            if _mic_listener is not None:
-                                time.sleep(0.3)
-                                _mic_listener.muted.clear()
+                            _kill_active_say()
+                            _tts_queue.put(None)
+                            print()
 
+            # Ensure TTS cleanup
+            if tts_thread is not None:
+                _stop_speaking.set()
+                _tts_queue.put(None)
+                tts_thread.join(timeout=2)
+            if _mic_listener is not None:
+                _mic_listener.muted.clear()
+
+        except KeyboardInterrupt:
+            _stop_speaking.set()
+            _kill_active_say()
+            if _mic_listener is not None:
+                _mic_listener.muted.clear()
+            print()
         except Exception as e:
             print()
             print_err(f"Brain error: {e}")
