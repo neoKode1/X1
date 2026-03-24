@@ -2,6 +2,7 @@
 prototype-x1 — main entry point
 ================================
 Run:  python3 main.py
+      python3 main.py --listen            (always-on mic — 3-way conversation)
       python3 main.py --model llama3.2
       python3 main.py --cloud anthropic   (skip Ollama, go straight to cloud)
 
@@ -231,6 +232,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cloud", choices=["anthropic", "openai"], default=None,
                    help="Skip Ollama, use cloud provider")
     p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    p.add_argument("--listen", action="store_true",
+                   help="Always-on mic mode — ARIA listens instead of waiting for keyboard input")
     return p.parse_args()
 
 
@@ -300,14 +303,29 @@ def main() -> None:
     # ── REPL ───────────────────────────────────────────────────────────────────
     skills_dir = Path(__file__).parent / "skills"
 
-    while True:
-        try:
-            user_input = input("Neokode: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            print_info("Shutting down.")
-            break
+    # ── Input source: mic or keyboard ─────────────────────────────────────────
+    def _input_stream():
+        """Yield (speaker, text) tuples from keyboard or mic."""
+        if args.listen:
+            from voice.listener import MicListener
+            print_info("Mic mode active — listening. Ctrl+C to quit.")
+            listener = MicListener(model_size="tiny")
+            try:
+                for text in listener.listen():
+                    print(f"\n[mic] {text}")
+                    yield "Neokode", text
+            except KeyboardInterrupt:
+                listener.stop()
+        else:
+            while True:
+                try:
+                    text = input("Neokode: ").strip()
+                    if text:
+                        yield "Neokode", text
+                except (KeyboardInterrupt, EOFError):
+                    return
 
+    for speaker, user_input in _input_stream():
         if not user_input:
             continue
 
