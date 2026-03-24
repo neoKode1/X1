@@ -20,6 +20,7 @@ from pathlib import Path
 from .config import BrainConfig
 from .llm import call_llm, stream_llm, Message
 from .memory import EpisodicMemory
+from .knowledge import KnowledgeStore
 from . import skills as skill_registry
 from .trust import TrustRegistry, Tier
 from .bcs import BCSTracker
@@ -212,6 +213,7 @@ class Brain:
     def __init__(self, cfg: BrainConfig | None = None) -> None:
         self.cfg = cfg or BrainConfig()
         self.memory = EpisodicMemory(self.cfg.memory)
+        self.knowledge = KnowledgeStore(persist_dir=self.cfg.memory.persist_dir)
         self.trust = TrustRegistry()
         self.bcs = BCSTracker()
         self._active_speaker: str = "unknown"
@@ -391,6 +393,14 @@ class Brain:
                 f"- [{e.role}] {e.text[:200]}" for e in recalled
             )
             messages.append({"role": "system", "content": mem_block})
+
+        # Knowledge base (RAG) — inject relevant docs if any exist
+        kb_hits = self.knowledge.search(user_input, top_k=3)
+        if kb_hits:
+            kb_block = "## Relevant Knowledge\n" + "\n".join(
+                f"- [{h['filename']}] {h['text'][:300]}" for h in kb_hits
+            )
+            messages.append({"role": "system", "content": kb_block})
 
         messages.extend(self.memory.as_messages(self.cfg.llm.context_window))
         messages.append({"role": "user", "content": user_input})

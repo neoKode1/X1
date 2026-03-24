@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -556,3 +556,69 @@ def save_skill(name: str, body: SkillSaveRequest):
 
     return {"ok": True, "file": skill_path.name, "bytes": len(body.code)}
 
+
+
+# ── Knowledge Base (RAG) REST API ─────────────────────────────────────────────
+KNOWLEDGE_DIR = BRAIN_PATH / "knowledge"
+
+def _get_knowledge_store():
+    """Lazy-init the knowledge store from the running brain or standalone."""
+    brain = get_brain()
+    if brain and hasattr(brain, "knowledge"):
+        return brain.knowledge
+    # Standalone fallback
+    from brain.knowledge import KnowledgeStore  # type: ignore[import]
+    persist_dir = str(BRAIN_PATH / "memory" / "chroma")
+    return KnowledgeStore(persist_dir=persist_dir)
+
+
+@app.get("/knowledge")
+def list_knowledge():
+    """List all documents in the knowledge base."""
+    store = _get_knowledge_store()
+    return {"docs": store.list_docs(), "total_chunks": store.count}
+
+
+@app.post("/knowledge/upload")
+async def upload_knowledge(file: UploadFile):
+    """Upload a file and ingest it into the knowledge base."""
+    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = KNOWLEDGE_DIR / file.filename
+    content = await file.read()
+    dest.write_bytes(content)
+    log.info("Knowledge file saved: %s (%d bytes)", dest.name, len(content))
+
+    store = _get_knowledge_store()
+    doc = store.ingest_file(dest, source="upload")
+    if not doc:
+        raise HTTPException(status_code=400, detail=f"Could not ingest {file.filename}")
+    return {"ok": True, "doc": {"filename": doc.filename, "doc_id": doc.doc_id,
+                                 "chunks": doc.chunks, "size_bytes": doc.size_bytes}}
+
+
+@app.post("/knowledge/ingest")
+def ingest_knowledge_folder():
+    """Ingest all files from the knowledge drop folder."""
+    store = _get_knowledge_store()
+    docs = store.ingest_folder()
+    return {"ok": True, "ingested": len(docs),
+            "docs": [{"filename": d.filename, "doc_id": d.doc_id, "chunks": d.chunks}
+                     for d in docs]}
+
+
+@app.delete("/knowledge/{doc_id}")
+def delete_knowledge(doc_id: str):
+    """Remove a document from the knowledge base by doc_id."""
+    store = _get_knowledge_store()
+    removed = store.remove_doc(doc_id)
+    if removed == 0:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"ok": True, "doc_id": doc_id, "chunks_removed": removed}
+
+
+@app.post("/knowledge/search")
+def search_knowledge(q: str, top_k: int = 3):
+    """Search the knowledge base."""
+    store = _get_knowledge_store()
+    hits = store.search(q, top_k=top_k)
+    return {"query": q, "results": hits}
