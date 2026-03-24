@@ -134,7 +134,7 @@ _SPEECH_STRIP_RE = re.compile(
     r"|\*[^*]+\*"                          # *stage directions*
     r"|\[[^\]]+\]"                         # [any bracket content] emotes
     r"|\([^)]{3,80}\)"                     # (parenthetical asides up to 80 chars)
-    r"|(?:^|\s)(?:silence|neural hum|hums?|chuckles? quietly|chuckles?|sighs?|pauses?|whispers?|exhales?|inhales?|laughs?|smiles?)\s*[,.]?"  # bare action words
+    r"|(?:^|\s)(?:silence|neural hum|hums?|chuckles? quietly|chuckles?|sighs?|pauses?|whispers?|exhales?|inhales?|laughs?|smiles?|whirs?|beeps?|clicks?|buzzes?|hisses?|crackles?)\s*[,.]?"  # bare action words
     r")"
 )
 
@@ -173,7 +173,35 @@ def breath_then_speak(text: str, stop: "threading.Event | None" = None) -> None:
 
 
 _SKILL_BLOCK_STRIP_RE = re.compile(r"```skill.*?```", re.DOTALL)
-_BARE_JSON_STRIP_RE   = re.compile(r'\{\s*"(?:skill|name)"\s*:\s*"[^"]+?".*?\}', re.DOTALL)
+
+
+def _strip_bare_json_blocks(text: str) -> str:
+    """Remove bare JSON skill-call objects from text, handling nested braces."""
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            # Peek to see if this looks like a skill call
+            snippet = text[i:i+40]
+            if re.match(r'\{\s*"(?:skill|name|action)"\s*:', snippet):
+                # Walk forward counting braces to find the balanced close
+                depth = 0
+                j = i
+                while j < len(text):
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            i = j + 1  # skip the whole block
+                            break
+                    j += 1
+                else:
+                    i = j  # ran off the end — drop the rest
+                continue
+        result.append(text[i])
+        i += 1
+    return "".join(result)
 
 
 def trickle_print(text: str, wpm: int = SPEECH_WPM,
@@ -187,7 +215,7 @@ def trickle_print(text: str, wpm: int = SPEECH_WPM,
     """
     # Strip skill JSON blocks — shown via action events, not trickle
     text = _SKILL_BLOCK_STRIP_RE.sub("", text)
-    text = _BARE_JSON_STRIP_RE.sub("", text)
+    text = _strip_bare_json_blocks(text)
     clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
     words = clean.split()
     if not words:
@@ -304,18 +332,21 @@ def main() -> None:
     skills_dir = Path(__file__).parent / "skills"
 
     # ── Input source: mic or keyboard ─────────────────────────────────────────
+    _mic_listener = None
+
     def _input_stream():
         """Yield (speaker, text) tuples from keyboard or mic."""
+        nonlocal _mic_listener
         if args.listen:
             from voice.listener import MicListener
             print_info("Mic mode active — listening. Ctrl+C to quit.")
-            listener = MicListener(model_size="tiny")
+            _mic_listener = MicListener(model_size="tiny")
             try:
-                for text in listener.listen():
+                for text in _mic_listener.listen():
                     print(f"\n[mic] {text}")
                     yield "Neokode", text
             except KeyboardInterrupt:
-                listener.stop()
+                _mic_listener.stop()
         else:
             while True:
                 try:
@@ -391,6 +422,9 @@ def main() -> None:
                     if full_text:
                         # ── Speak + trickle — Ctrl+C interrupts both ──────
                         _stop_speaking.clear()
+                        # Mute mic while ARIA speaks to prevent echo feedback
+                        if _mic_listener is not None:
+                            _mic_listener.muted.set()
                         tts_thread: threading.Thread | None = None
                         if _TTS_AVAILABLE:
                             speech_text = _strip_for_speech(full_text)
@@ -416,6 +450,10 @@ def main() -> None:
                             _stop_speaking.set()
                             if tts_thread is not None:
                                 tts_thread.join(timeout=2)
+                            # Unmute mic — give 0.3s buffer after speech ends
+                            if _mic_listener is not None:
+                                time.sleep(0.3)
+                                _mic_listener.muted.clear()
                     else:
                         print()
 
