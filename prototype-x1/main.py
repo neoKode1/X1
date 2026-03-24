@@ -430,6 +430,8 @@ def main() -> None:
                 elif event == "done":
                     response = data
                     full_text = "".join(token_buf)
+                    if args.debug:
+                        print(f"\n[DEBUG raw] {repr(full_text)}", flush=True)
                     if full_text:
                         # ── Speak + trickle — Ctrl+C interrupts both ──────
                         _stop_speaking.clear()

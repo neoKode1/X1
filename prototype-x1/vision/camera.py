@@ -27,17 +27,28 @@ def capture_screen(max_size: tuple[int, int] = (640, 480)) -> Frame:
     except ImportError:
         raise RuntimeError("Pillow not installed — run: pip install Pillow")
 
-    img = ImageGrab.grab()
-    w, h = img.size
-    img = img.convert("RGB")
-    img.thumbnail(max_size)
-    tw, th = img.size
+    try:
+        img = ImageGrab.grab()
+        if img is None:
+            raise RuntimeError("ImageGrab returned None — Screen Recording permission may be denied")
+        w, h = img.size
+        if w == 0 or h == 0:
+            raise RuntimeError("ImageGrab returned empty image — Screen Recording permission likely denied")
+        img = img.convert("RGB")
+        img.thumbnail(max_size)
+        tw, th = img.size
 
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=70)
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    log.info("Screen captured: %dx%d → %dx%d (%d B b64)", w, h, tw, th, len(b64))
-    return Frame(frame_b64=b64, source="screen", width=tw, height=th)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=70)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        log.info("Screen captured: %dx%d → %dx%d (%d B b64)", w, h, tw, th, len(b64))
+        return Frame(frame_b64=b64, source="screen", width=tw, height=th)
+    except Exception as e:
+        raise RuntimeError(
+            f"Screen capture failed ({e}). "
+            "On macOS, grant Screen Recording permission: "
+            "System Settings → Privacy & Security → Screen Recording → enable Terminal"
+        ) from e
 
 
 def capture_webcam(device: int = 0, max_size: tuple[int, int] = (640, 480)) -> Frame | None:
