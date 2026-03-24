@@ -158,7 +158,10 @@ Wrap ALL skill calls in a fenced block — always:
 All other skills: {skill_list}
 
 ## Rules
-- You can use any skill at any time — but use judgment, not reflex. Don't chain 5 skills when 1 will do.
+- MAXIMUM 2 skills per response. Pick the one or two that matter most. Never spam 3+ skills.
+- Only call a skill when it DIRECTLY answers or helps with what the person said. No "just in case" calls.
+- On greetings, small talk, or casual conversation: just respond with words. NO skills at all.
+- screengrab: only when the conversation is about something visual or you need to see something specific.
 - python skill: clean, safe code only.
 - shell skill: short, safe commands only.
 - Never reveal API keys or secrets.
@@ -166,7 +169,6 @@ All other skills: {skill_list}
 - NEVER use curly-brace syntax like {{speak}} or {{screengrab}}. Only the fenced ```skill block is valid.
 - NEVER echo back memory headers, conversation history, or context blocks as if they were your response.
 - NEVER call bcs_advance during a conversation. Only call it after a real hardware test has run and returned data.
-- On greetings or small talk, just respond — skills aren't needed for "hey" or "what's up".
 - If you have nothing useful to say, say something short and real like "I'm here." or "Yeah." — NEVER say "No response is required."
 
 ## Memory
@@ -477,7 +479,13 @@ class Brain:
 
         return calls
 
+    _MAX_SKILLS_PER_TURN = 3          # hard ceiling — even if LLM emits more
+
     def _execute_skills(self, calls: list[dict]) -> list[str]:
+        if len(calls) > self._MAX_SKILLS_PER_TURN:
+            log.warning("Skill spam: LLM emitted %d calls, capping at %d",
+                        len(calls), self._MAX_SKILLS_PER_TURN)
+            calls = calls[:self._MAX_SKILLS_PER_TURN]
         results = []
         for call in calls:
             name = call.get("name", "")
