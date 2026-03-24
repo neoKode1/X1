@@ -79,6 +79,7 @@ class MicListener:
         self._q: queue.Queue[np.ndarray] = queue.Queue()
         self._stop = threading.Event()
         self.muted = threading.Event()  # set this while ARIA is speaking to avoid echo
+        self._listening = False  # guard against duplicate listen() calls
 
     def _load_model(self) -> None:
         if self._model is None:
@@ -98,6 +99,9 @@ class MicListener:
     _WORD_CORRECTIONS = {
         "mim coder": "Vibcoder", "mim coater": "Vibcoder",
         "vibe coder": "Vibcoder", "vib coder": "Vibcoder",
+        "vibecoder": "Vibcoder", "five coder": "Vibcoder",
+        "eskos": "skills", "e skos": "skills",
+        "shrapine": "she's trying", "the church": "she's",
         "vibecoder": "Vibcoder", "vibecoda": "Vibcoder",
         "iapx": "Vibcoder", "vip coder": "Vibcoder",
         "vim coder": "Vibcoder", "by coder": "Vibcoder",
@@ -137,6 +141,10 @@ class MicListener:
 
     def listen(self):
         """Generator — yields transcribed utterance strings."""
+        if self._listening:
+            log.warning("listen() already running — skipping duplicate call")
+            return
+        self._listening = True
         import sounddevice as sd
         self._load_model()
         log.info("Mic open — listening.")

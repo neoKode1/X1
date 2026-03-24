@@ -305,7 +305,7 @@ def _start_mic_listener():
     global _mic_listener
     if not MIC_AVAILABLE or _mic_listener is not None:
         return _mic_listener
-    _mic_listener = MicListener(model_size="tiny")
+    _mic_listener = MicListener(model_size="base")
     log.info("Mic listener starting…")
     return _mic_listener
 

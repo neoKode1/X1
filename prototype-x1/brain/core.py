@@ -391,6 +391,43 @@ class Brain:
         messages.append({"role": "user", "content": user_input})
         return messages
 
+    @staticmethod
+    def _extract_balanced_json(text: str) -> list[str]:
+        """Extract top-level balanced {...} substrings from text."""
+        results = []
+        i = 0
+        while i < len(text):
+            if text[i] == '{':
+                depth = 0
+                start = i
+                in_str = False
+                escape = False
+                for j in range(i, len(text)):
+                    ch = text[j]
+                    if escape:
+                        escape = False
+                        continue
+                    if ch == '\\' and in_str:
+                        escape = True
+                        continue
+                    if ch == '"' and not escape:
+                        in_str = not in_str
+                        continue
+                    if in_str:
+                        continue
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            results.append(text[start:j + 1])
+                            i = j
+                            break
+                else:
+                    break  # unbalanced — stop
+            i += 1
+        return results
+
     def _extract_skill_calls(self, text: str) -> list[dict]:
         calls = []
         seen_json: set[str] = set()
@@ -414,10 +451,11 @@ class Brain:
         for match in SKILL_BLOCK_RE.finditer(text):
             _add(match.group(1))
 
-        # 2. Fallback: bare JSON objects the model emitted without fences
+        # 2. Fallback: balanced JSON objects with "name" or "skill" key
         if not calls:
-            for match in SKILL_JSON_RE.finditer(text):
-                _add(match.group(0))
+            for blob in self._extract_balanced_json(text):
+                if '"name"' in blob or '"skill"' in blob:
+                    _add(blob)
 
         # 3. Last resort: brace-shorthand {skillname {args}} the model keeps emitting
         if not calls:
