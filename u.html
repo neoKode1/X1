@@ -22,13 +22,29 @@
   @keyframes pulse { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
   #mute-indicator { transition: opacity 0.3s; }
   .cursor-blink::after { content: '▊'; animation: pulse 0.8s infinite; color: #facc15; }
+  #anim-container {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    transition: filter 0.08s ease-out, transform 0.08s ease-out;
+    will-change: transform, filter;
+  }
+  #voice-glow {
+    position: fixed; inset: 0; z-index: 1; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 50%, rgba(250,204,21,0.0) 0%, transparent 70%);
+    transition: opacity 0.1s ease-out;
+    opacity: 0;
+  }
 </style>
 </head>
 
 <body class="m-0 w-screen h-screen overflow-hidden bg-[#050510] cursor-pointer select-none" onclick="toggleMute()">
 
   <!-- Fullscreen Animation Container -->
-  <div data-us-project="lmSXlfVhWVrbN3qzElFu" data-us-scale="1" data-us-dpi="1.5" data-us-fps="60" data-us-lazyload="true" data-us-production="true" role="img" aria-label="Animated 3D background" style="position:absolute;top:0;left:0;width:100%;height:100%;"></div>
+  <div id="anim-container">
+    <div data-us-project="lmSXlfVhWVrbN3qzElFu" data-us-scale="1" data-us-dpi="1.5" data-us-fps="60" data-us-lazyload="true" data-us-production="true" role="img" aria-label="Animated 3D background" style="width:100%;height:100%;"></div>
+  </div>
+
+  <!-- Voice-reactive glow overlay -->
+  <div id="voice-glow"></div>
 
   <!-- Mute indicator — top center -->
   <div id="mute-indicator" style="position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:100;opacity:0;pointer-events:none;">
@@ -54,13 +70,85 @@
   let ws = null;
   let muted = false;
   let reconnectTimer = null;
+  let isSpeaking = false;
 
   const chatLog = document.getElementById('chat-log');
   const muteIndicator = document.getElementById('mute-indicator');
   const muteLabel = document.getElementById('mute-label');
   const dot = document.getElementById('dot');
   const connText = document.getElementById('conn-text');
-  let streamEl = null; // current streaming ARIA message element
+  const animContainer = document.getElementById('anim-container');
+  const voiceGlow = document.getElementById('voice-glow');
+  let streamEl = null;
+
+  // ── Audio reactivity via browser mic ──────────────────────────
+  let audioCtx = null, analyser = null, dataArray = null;
+  let audioInitialized = false;
+
+  async function initAudio() {
+    if (audioInitialized) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx = new AudioContext();
+      const source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.8;
+      source.connect(analyser);
+      dataArray = new Uint8Array(analyser.frequencyBinCount);
+      audioInitialized = true;
+      audioLoop();
+    } catch (e) {
+      console.warn('Mic access denied — using fallback pulse reactivity');
+      fallbackLoop();
+    }
+  }
+
+  function getVolume() {
+    if (!analyser || !dataArray) return 0;
+    analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+    return sum / dataArray.length / 255; // 0..1
+  }
+
+  let smoothVol = 0;
+
+  function audioLoop() {
+    const raw = getVolume();
+    // Smooth it — fast attack, slow decay
+    smoothVol = raw > smoothVol ? raw * 0.6 + smoothVol * 0.4 : raw * 0.15 + smoothVol * 0.85;
+    applyReactivity(smoothVol);
+    requestAnimationFrame(audioLoop);
+  }
+
+  // Fallback: pulse based on TTS state + token flow
+  let fallbackEnergy = 0;
+  function fallbackLoop() {
+    const target = isSpeaking ? 0.4 : 0;
+    fallbackEnergy += (target - fallbackEnergy) * 0.1;
+    applyReactivity(fallbackEnergy);
+    requestAnimationFrame(fallbackLoop);
+  }
+
+  function applyReactivity(vol) {
+    // Scale: 1.0 → 1.06 at max volume
+    const scale = 1 + vol * 0.06;
+    // Brightness: 1.0 → 1.4 at max
+    const brightness = 1 + vol * 0.4;
+    // Hue shift: subtle color drift when active
+    const hue = vol * 8;
+
+    animContainer.style.transform = `scale(${scale})`;
+    animContainer.style.filter = `brightness(${brightness}) hue-rotate(${hue}deg)`;
+
+    // Glow overlay — golden pulse
+    voiceGlow.style.opacity = vol * 0.35;
+    voiceGlow.style.background = `radial-gradient(ellipse at 50% 50%, rgba(250,204,21,${vol * 0.12}) 0%, rgba(139,92,246,${vol * 0.06}) 40%, transparent 70%)`;
+  }
+
+  // Init audio on first click (browser requires user gesture)
+  document.addEventListener('click', () => initAudio(), { once: true });
 
   function connect() {
     ws = new WebSocket(WS_URL);
@@ -94,6 +182,8 @@
         span.classList.add('cursor-blink');
         span.textContent += t;
         scrollChat();
+        // Kick fallback energy on token flow
+        if (!audioInitialized) fallbackEnergy = Math.min(fallbackEnergy + 0.08, 0.5);
         break;
       }
       case 'response': {
@@ -111,6 +201,7 @@
         if (msg.payload?.text) addMsg('user', msg.payload.text);
         break;
       case 'tts':
+        isSpeaking = !!msg.payload?.speaking;
         break;
       case 'status':
         if (msg.payload?.paused !== undefined) {
