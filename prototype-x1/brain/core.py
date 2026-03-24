@@ -479,13 +479,13 @@ class Brain:
 
         return calls
 
-    _MAX_SKILLS_PER_TURN = 3          # hard ceiling — even if LLM emits more
+    _MAX_SKILLS_PER_TURN = 3          # hard ceiling across ALL rounds
 
-    def _execute_skills(self, calls: list[dict]) -> list[str]:
-        if len(calls) > self._MAX_SKILLS_PER_TURN:
-            log.warning("Skill spam: LLM emitted %d calls, capping at %d",
-                        len(calls), self._MAX_SKILLS_PER_TURN)
-            calls = calls[:self._MAX_SKILLS_PER_TURN]
+    def _execute_skills(self, calls: list[dict], budget: int | None = None) -> list[str]:
+        cap = budget if budget is not None else self._MAX_SKILLS_PER_TURN
+        if len(calls) > cap:
+            log.warning("Skill cap: %d calls → trimmed to %d", len(calls), cap)
+            calls[:] = calls[:cap]            # mutate so caller sees trimmed list
         results = []
         for call in calls:
             name = call.get("name", "")
@@ -532,11 +532,15 @@ class Brain:
         all_skill_calls: list[dict] = []
         all_skill_results: list[str] = []
 
+        budget = self._MAX_SKILLS_PER_TURN
         for _round in range(max_skill_rounds):
+            if budget <= 0:
+                break
             calls = self._extract_skill_calls(reply)
             if not calls:
                 break
-            results = self._execute_skills(calls)
+            results = self._execute_skills(calls, budget=budget)
+            budget -= len(calls)              # calls was trimmed in-place
             all_skill_calls.extend(calls)
             all_skill_results.extend(results)
 
@@ -629,14 +633,18 @@ class Brain:
         all_skill_results: list[str] = []
 
         # Skill execution rounds (non-streaming — skills are fast)
+        budget = self._MAX_SKILLS_PER_TURN
         for _round in range(max_skill_rounds):
+            if budget <= 0:
+                break
             if stop_event and stop_event.is_set():
                 yield ("cancelled", None)
                 return
             calls = self._extract_skill_calls(full_text)
             if not calls:
                 break
-            results = self._execute_skills(calls)
+            results = self._execute_skills(calls, budget=budget)
+            budget -= len(calls)
             all_skill_calls.extend(calls)
             all_skill_results.extend(results)
 

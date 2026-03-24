@@ -114,15 +114,16 @@ def _strip_bare_json(text: str) -> str:
     return "".join(result)
 
 def _kill_active_say() -> None:
+    """Kill running `say` process immediately. Safe to call from any thread."""
     global _active_say_proc
     with _proc_lock:
-        if _active_say_proc and _active_say_proc.poll() is None:
-            _active_say_proc.kill()          # SIGKILL — terminate() was too gentle
-            try:
-                _active_say_proc.wait(timeout=1)
-            except Exception:
-                pass
-            _active_say_proc = None
+        proc = _active_say_proc
+        _active_say_proc = None
+    if proc and proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 def _speak_sentence(sentence: str, stop: threading.Event) -> None:
     """Speak a single sentence via macOS `say`. Skips if stop is set."""
@@ -137,7 +138,8 @@ def _speak_sentence(sentence: str, stop: threading.Event) -> None:
         _active_say_proc = proc
     proc.wait()
     with _proc_lock:
-        _active_say_proc = None
+        if _active_say_proc is proc:     # only clear if WE still own it
+            _active_say_proc = None
 
 # ── Message helpers ───────────────────────────────────────────────────────────
 def msg(kind: str, payload: Any) -> str:
