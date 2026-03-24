@@ -347,11 +347,13 @@ class Brain:
                     f"[FOUNDER_SIGNAL] {signal} — context: {text[:80]}"
                 )
 
-    # Skills exempt from BCS fail-tracking (management / infrastructure)
+    # Skills exempt from BCS fail-tracking (observation / utility / management)
     _BCS_EXEMPT = frozenset({
         "introduce_friend", "revoke_friend", "list_friends", "set_nickname",
         "bcs_report", "bcs_advance", "scrap_report",
         "speak", "led", "dev_note", "read_dev_notes", "clear_dev_notes",
+        # Observation & utility — these don't advance build progress by design
+        "screengrab", "python", "shell", "read_file", "write_file", "list_dir",
     })
 
     def _build_messages(self, user_input: str, recalled: list,
