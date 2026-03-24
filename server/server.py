@@ -89,6 +89,30 @@ def _strip_banned(text: str) -> str:
         text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
     return text.strip()
 
+def _strip_bare_json(text: str) -> str:
+    """Remove bare JSON skill-call objects from text, handling nested braces."""
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0
+            j = i
+            while j < len(text):
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        i = j + 1
+                        break
+                j += 1
+            else:
+                i = j
+            continue
+        result.append(text[i])
+        i += 1
+    return "".join(result)
+
 def _kill_active_say() -> None:
     global _active_say_proc
     with _proc_lock:
@@ -205,8 +229,8 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
         if kind == "thinking":
             await ws.send_text(msg("thinking", {}))
         elif kind == "token":
-            await ws.send_text(msg("token", {"text": data}))
-            # Parse for TTS sentence boundaries (suppress JSON skill calls)
+            # Filter JSON skill calls from both UI stream and TTS
+            clean_chars: list[str] = []
             for ch in data:
                 if ch == '{':
                     brace_depth += 1
@@ -214,6 +238,7 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                     if ch == '}':
                         brace_depth -= 1
                     continue
+                clean_chars.append(ch)
                 sentence_buf.append(ch)
                 if ch in '.!?' and len(sentence_buf) > 3:
                     sentence = "".join(sentence_buf).strip()
@@ -221,6 +246,10 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                     if sentence:
                         tts_q.put(sentence)
                     sentence_buf.clear()
+            # Only send clean text to the UI (no raw JSON)
+            clean_text = "".join(clean_chars)
+            if clean_text:
+                await ws.send_text(msg("token", {"text": clean_text}))
         elif kind == "action":
             await ws.send_text(msg("action", {"action": data}))
             sentence_buf.clear()
@@ -228,8 +257,11 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
             await ws.send_text(msg("vision", data))
         elif kind == "done":
             br = data  # BrainResponse
+            # Strip JSON blocks and banned phrases from final text
+            clean_final = _strip_bare_json(br.text)
+            clean_final = _strip_banned(clean_final)
             final_response = {
-                "text": br.text,
+                "text": clean_final,
                 "provider": br.provider,
                 "latency_ms": br.latency_ms,
                 "skill_calls": br.skill_calls,
