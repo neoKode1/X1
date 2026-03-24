@@ -162,15 +162,20 @@ def status_msg(state: str, extra: dict | None = None) -> str:
 async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                         speaker: str = "unknown",
                         stop_speaking: threading.Event | None = None,
-                        mic_listener: Any = None) -> None:
-    """Run brain.stream() in a thread, relay events to WebSocket, fire TTS."""
+                        mic_listener: Any = None,
+                        cancel_event: threading.Event | None = None) -> bool:
+    """Run brain.stream() in a thread, relay events to WebSocket, fire TTS.
+
+    Returns True if completed normally, False if cancelled by cancel_event.
+    """
     loop = asyncio.get_running_loop()
     aqueue: asyncio.Queue = asyncio.Queue()
     _DONE = object()
 
     def run_in_thread():
         try:
-            for event in brain.stream(user_text, speaker=speaker):
+            for event in brain.stream(user_text, speaker=speaker,
+                                       stop_event=cancel_event):
                 loop.call_soon_threadsafe(aqueue.put_nowait, event)
         except Exception as exc:
             loop.call_soon_threadsafe(aqueue.put_nowait, ("error", str(exc)))
@@ -191,10 +196,9 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                 sentence = tts_q.get()
                 if sentence is None:
                     break
-                if stop_ev.is_set():
+                if stop_ev.is_set() or (cancel_event and cancel_event.is_set()):
                     continue  # drain queue without speaking
                 _speak_sentence(sentence, stop_ev)
-                # Notify client TTS is speaking
                 try:
                     loop.call_soon_threadsafe(
                         aqueue.put_nowait, ("_tts", True))
@@ -216,6 +220,7 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
     final_response: dict | None = None
     brace_depth = 0
     sentence_buf: list[str] = []
+    was_cancelled = False
 
     while True:
         event = await aqueue.get()
@@ -223,6 +228,13 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
             break
 
         kind, data = event
+        if kind == "cancelled":
+            was_cancelled = True
+            tts_q.put(None)
+            # Don't return yet — drain remaining events until _DONE
+            continue
+        if was_cancelled:
+            continue  # skip events after cancellation
         if kind == "_tts":
             await ws.send_text(msg("tts", {"speaking": data}))
             continue
@@ -275,10 +287,12 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
         elif kind == "error":
             tts_q.put(None)
             await ws.send_text(msg("error", {"message": data}))
-            return
+            return True
 
-    if final_response is not None:
+    if not was_cancelled and final_response is not None:
         await ws.send_text(msg("response", final_response))
+
+    return not was_cancelled
 
 
 # ── Mic listener background task ─────────────────────────────────────────────
@@ -310,10 +324,20 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.send_text(status_msg("idle"))
 
     # Background task: relay mic transcriptions to this WebSocket
+    # Uses debouncing + cancellation for fluid conversation
     mic_task = None
+    _cancel_brain = threading.Event()  # signals brain to stop mid-stream
+    _DEBOUNCE_SEC = 0.6  # wait for Whisper fragments to settle
+
     if mic is not None:
         async def mic_relay():
-            """Run mic.listen() in a thread, relay transcriptions to WS + brain."""
+            """Run mic.listen() in a thread, relay transcriptions to WS + brain.
+
+            Key behaviors:
+            - Debounces rapid Whisper fragments into a single input
+            - Cancels ongoing brain response when new speech arrives
+            - Never blocks on a stale response
+            """
             loop = asyncio.get_running_loop()
             mic_q: asyncio.Queue = asyncio.Queue()
 
@@ -326,21 +350,60 @@ async def websocket_endpoint(ws: WebSocket):
 
             threading.Thread(target=mic_thread, daemon=True).start()
 
+            processing = False  # True while brain is streaming a response
+
             while True:
                 try:
                     text = await mic_q.get()
                 except asyncio.CancelledError:
                     break
+
+                # ── Debounce: collect rapid fragments ──────────────────
+                collected = text
+                deadline = asyncio.get_event_loop().time() + _DEBOUNCE_SEC
+                while True:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        more = await asyncio.wait_for(mic_q.get(), timeout=remaining)
+                        collected = more  # use the latest (most complete) fragment
+                        deadline = asyncio.get_event_loop().time() + _DEBOUNCE_SEC
+                    except asyncio.TimeoutError:
+                        break
+
+                text = collected.strip()
+                if not text:
+                    continue
+
+                # ── Cancel any in-progress response ───────────────────
+                if processing:
+                    log.info("New speech arrived — cancelling current response")
+                    _cancel_brain.set()
+                    _kill_active_say()
+                    # Give brain thread a moment to see the cancel
+                    await asyncio.sleep(0.05)
+
                 # Send mic transcription to UI
                 await ws.send_text(msg("mic", {"text": text}))
-                # Feed into brain automatically
+
+                # Feed into brain
                 if brain:
+                    _cancel_brain.clear()
                     stop_speaking.clear()
+                    processing = True
                     await ws.send_text(status_msg("thinking"))
-                    await _stream_brain(ws, brain, text, speaker="Neokode",
-                                        stop_speaking=stop_speaking,
-                                        mic_listener=mic)
-                    await ws.send_text(status_msg("idle"))
+                    completed = await _stream_brain(
+                        ws, brain, text, speaker="Neokode",
+                        stop_speaking=stop_speaking,
+                        mic_listener=mic,
+                        cancel_event=_cancel_brain,
+                    )
+                    processing = False
+                    if completed:
+                        await ws.send_text(status_msg("idle"))
+                    else:
+                        log.info("Response cancelled — ready for new input")
 
         mic_task = asyncio.create_task(mic_relay())
 
@@ -358,9 +421,11 @@ async def websocket_endpoint(ws: WebSocket):
                 stop_speaking.clear()
 
                 if brain:
+                    _cancel_brain.clear()
                     await _stream_brain(ws, brain, user_text, speaker=speaker,
                                         stop_speaking=stop_speaking,
-                                        mic_listener=mic)
+                                        mic_listener=mic,
+                                        cancel_event=_cancel_brain)
                 else:
                     reason = _import_err if not BRAIN_AVAILABLE else "brain init failed"
                     await ws.send_text(msg("thinking", {}))
@@ -375,9 +440,10 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_text(status_msg("idle"))
 
             elif kind == "pause":
-                # Stop TTS + mute mic so she stops listening
-                log.info("Pause received — killing TTS, muting mic")
+                # Stop TTS + mute mic + cancel brain
+                log.info("Pause received — killing TTS, cancelling brain, muting mic")
                 stop_speaking.set()
+                _cancel_brain.set()
                 _kill_active_say()
                 if _mic_listener is not None:
                     _mic_listener.muted.set()

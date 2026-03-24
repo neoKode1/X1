@@ -492,30 +492,62 @@ class Brain:
         )
 
     def stream(self, user_input: str, max_skill_rounds: int = 3,
-               speaker: str = "unknown"):
+               speaker: str = "unknown",
+               stop_event: "threading.Event | None" = None):
         """Sync generator that yields streaming events for the server to relay.
 
         Yields:
             ("thinking", None)
             ("token", str)          -- one per LLM token
             ("action", dict)        -- one per skill execution
+            ("cancelled", None)     -- if stop_event fired mid-stream
             ("done", BrainResponse)
+
+        Args:
+            stop_event: if set, the stream aborts early so the server can
+                        start processing new input without waiting.
         """
+        import concurrent.futures
+        import threading as _threading
+
         self._active_speaker = speaker
         t0 = time.time()
         yield ("thinking", None)
+
+        if stop_event and stop_event.is_set():
+            yield ("cancelled", None)
+            return
 
         # Detect founder tone/pattern signals before reasoning
         if self.trust.get_tier(speaker).value >= 8:
             self._detect_founder_patterns(user_input)
 
-        recalled = self.memory.recall(user_input)
+        # ── Background memory recall — don't block first token ────────────
+        recall_future: concurrent.futures.Future | None = None
+        _recall_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        recalled: list = []
+
+        def _do_recall():
+            return self.memory.recall(user_input)
+
+        recall_future = _recall_pool.submit(_do_recall)
+
+        # Wait up to 150ms for memory — if it's slow, proceed without it
+        try:
+            recalled = recall_future.result(timeout=0.15)
+        except concurrent.futures.TimeoutError:
+            log.debug("Memory recall slow — proceeding without recalled context")
+            recalled = []
+
         messages = self._build_messages(user_input, recalled, speaker)
 
         # Stream first LLM reply token-by-token
         full_text = ""
         provider = "unknown"
         for token, prov in stream_llm(self.cfg.llm, messages):
+            if stop_event and stop_event.is_set():
+                yield ("cancelled", None)
+                return
             full_text += token
             provider = prov
             yield ("token", token)
@@ -525,6 +557,9 @@ class Brain:
 
         # Skill execution rounds (non-streaming — skills are fast)
         for _round in range(max_skill_rounds):
+            if stop_event and stop_event.is_set():
+                yield ("cancelled", None)
+                return
             calls = self._extract_skill_calls(full_text)
             if not calls:
                 break
@@ -561,12 +596,25 @@ class Brain:
                               "content": f"[SKILL RESULTS]\n{results_text}\n\nContinue."})
             full_text = ""
             for token, prov in stream_llm(self.cfg.llm, messages):
+                if stop_event and stop_event.is_set():
+                    yield ("cancelled", None)
+                    return
                 full_text += token
                 provider = prov
                 yield ("token", token)
 
-        self.memory.add("user", user_input)
-        self.memory.add("assistant", full_text)
+        # ── Background memory write — don't block the response ────────────
+        def _bg_memorize():
+            self.memory.add("user", user_input)
+            self.memory.add("assistant", full_text)
+            # If recall finished late, grab it (for next turn's benefit)
+            if recall_future and not recall_future.done():
+                try:
+                    recall_future.result(timeout=2)
+                except Exception:
+                    pass
+
+        _threading.Thread(target=_bg_memorize, daemon=True).start()
 
         latency = int((time.time() - t0) * 1000)
         log.info("Stream turn complete in %dms via %s — skills=%d",
