@@ -493,6 +493,11 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         if mic_task:
             mic_task.cancel()
+        # Stop the mic listener so it can be restarted on next connection
+        if _mic_listener is not None:
+            _mic_listener.stop()
+            _mic_listener._listening = False
+            _mic_listener._stop.clear()  # reset for next connection
 
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health")
