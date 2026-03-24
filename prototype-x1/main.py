@@ -153,23 +153,7 @@ def _strip_for_speech(text: str) -> str:
 
 
 def breath_then_speak(text: str, stop: "threading.Event | None" = None) -> None:
-    """
-    Human-paced pre-speech ritual:
-      1. Two-second pause — interruptible, 100ms ticks so spacebar cuts in fast.
-      2. A random filler phrase out loud.
-      3. Then the actual response.
-    """
-    global _last_filler
-    # Interruptible breath — 20 × 100ms = 2s, but exits immediately on stop
-    for _ in range(20):
-        if stop and stop.is_set():
-            return
-        time.sleep(0.1)
-
-    pool = [f for f in _FILLERS if f != _last_filler]
-    filler = _random.choice(pool)
-    _last_filler = filler
-    speak(filler, stop)
+    """Speak immediately — no delays, no filler."""
     speak(text, stop)
 
 
@@ -407,15 +391,33 @@ def main() -> None:
             skill_calls = []
             token_buf: list[str] = []
             response = None
+            _in_skill_block = False
 
             print("ARIA: ", end="", flush=True)
 
             for event, data in brain.stream(user_input, speaker="Neokode"):
                 if event == "thinking":
-                    pass  # label already printed above
+                    pass
 
                 elif event == "token":
-                    token_buf.append(data)   # collect — don't blast yet
+                    token_buf.append(data)
+                    # ── Stream tokens live to terminal ──
+                    # Suppress ```skill blocks — they show via action events
+                    chunk = data
+                    if "```skill" in "".join(token_buf[-10:]):
+                        _in_skill_block = True
+                    if _in_skill_block:
+                        if "```" in chunk and _in_skill_block and len(token_buf) > 1:
+                            # closing fence — check if this ends the block
+                            tail = "".join(token_buf)
+                            # count fences after the opening
+                            if tail.count("```") >= 2:
+                                _in_skill_block = False
+                        continue  # don't print skill JSON
+                    # Strip stray markdown / emoji for terminal
+                    clean = _EMOJI_STRIP_RE.sub("", chunk)
+                    if clean:
+                        print(clean, end="", flush=True)
 
                 elif event == "action":
                     name = data.get("params", {}).get("name", "?")
@@ -423,52 +425,47 @@ def main() -> None:
                     print()
                     print_info(f"  → [{name}] {result}")
                     skill_calls.append(name)
-                    # Ready to start printing again after the action line
-                    if token_buf:
-                        print("ARIA: ", end="", flush=True)
+                    print("ARIA: ", end="", flush=True)
+                    _in_skill_block = False
 
                 elif event == "done":
                     response = data
                     full_text = "".join(token_buf)
                     if args.debug:
                         print(f"\n[DEBUG raw] {repr(full_text)}", flush=True)
+                    print(flush=True)  # final newline after streamed tokens
                     if full_text:
-                        # ── Speak + trickle — Ctrl+C interrupts both ──────
+                        # ── TTS — fire immediately, no delays ──
                         _stop_speaking.clear()
-                        # Mute mic while ARIA speaks to prevent echo feedback
                         if _mic_listener is not None:
                             _mic_listener.muted.set()
                         tts_thread: threading.Thread | None = None
                         if _TTS_AVAILABLE:
                             speech_text = _strip_for_speech(full_text)
-                            tts_thread = threading.Thread(
-                                target=breath_then_speak,
-                                args=(speech_text, _stop_speaking),
-                                daemon=True,
-                            )
-                            tts_thread.start()
+                            if speech_text:
+                                tts_thread = threading.Thread(
+                                    target=breath_then_speak,
+                                    args=(speech_text, _stop_speaking),
+                                    daemon=True,
+                                )
+                                tts_thread.start()
                         try:
-                            # Interruptible breath then trickle in foreground
-                            for _ in range(20):
-                                if _stop_speaking.is_set():
-                                    break
-                                time.sleep(0.1)
-                            trickle_print(full_text, stop=_stop_speaking)
-                        except KeyboardInterrupt:
-                            # Ctrl+C — cut the voice, return to YOU:
-                            _stop_speaking.set()
-                            _kill_active_say()
-                            print()  # clean newline
+                            # Wait for TTS to finish (interruptible)
+                            if tts_thread is not None:
+                                while tts_thread.is_alive():
+                                    try:
+                                        tts_thread.join(timeout=0.2)
+                                    except KeyboardInterrupt:
+                                        _stop_speaking.set()
+                                        _kill_active_say()
+                                        break
                         finally:
                             _stop_speaking.set()
                             if tts_thread is not None:
-                                tts_thread.join(timeout=2)
-                            # Unmute mic — give 0.3s buffer after speech ends
+                                tts_thread.join(timeout=1)
                             if _mic_listener is not None:
                                 time.sleep(0.3)
                                 _mic_listener.muted.clear()
-                    else:
-                        print()
 
         except Exception as e:
             print()
