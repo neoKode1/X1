@@ -152,7 +152,7 @@ Wrap ALL skill calls in a fenced block — always:
 - `shell` — run a short safe shell command: `{{"name": "shell", "args": {{"command": "ls -la"}}}}`
 - `python` — run safe Python: `{{"name": "python", "args": {{"code": "print('hi')"}}}}`
 - `read_file` — `{{"name": "read_file", "args": {{"path": "relative/path"}}}}`
-- `move` — `{{"name": "move", "args": {{"direction": "forward", "speed": 50}}}}`
+- `move` — `{{"name": "move", "args": {{"direction": "forward", "duration_ms": 500}}}}`
 - `bcs_report` — no args needed: `{{"name": "bcs_report", "args": {{}}}}`
 
 All other skills: {skill_list}
