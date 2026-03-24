@@ -376,17 +376,22 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_text(status_msg("idle"))
 
             elif kind == "pause":
-                # Stop TTS immediately, keep mic open
-                log.info("Pause received — killing TTS")
+                # Stop TTS + mute mic so she stops listening
+                log.info("Pause received — killing TTS, muting mic")
                 stop_speaking.set()
                 _kill_active_say()
+                if mic_listener is not None:
+                    mic_listener.muted.set()
                 await ws.send_text(msg("tts", {"speaking": False}))
-                await ws.send_text(status_msg("idle", {"paused": True}))
+                await ws.send_text(msg("mic", {"text": ""}))  # clear indicator
+                await ws.send_text(status_msg("idle", {"paused": True, "mic": False}))
 
             elif kind == "resume":
-                log.info("Resume received")
+                log.info("Resume received — unmuting mic")
                 stop_speaking.clear()
-                await ws.send_text(status_msg("idle", {"paused": False}))
+                if mic_listener is not None:
+                    mic_listener.muted.clear()
+                await ws.send_text(status_msg("idle", {"paused": False, "mic": True}))
 
     except WebSocketDisconnect:
         log.info("Client disconnected")

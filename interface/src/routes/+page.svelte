@@ -131,9 +131,9 @@
         class:active={paused.value}
         onclick={togglePause}
         disabled={!connected.value}
-        title={paused.value ? 'Resume ARIA' : 'Pause ARIA — stops speech, keeps mic open'}
+        title={paused.value ? 'Unmute — ARIA starts listening again' : 'Mute — stops ARIA from listening and speaking'}
       >
-        {paused.value ? '▶' : '⏸'}
+        {paused.value ? '🎙' : '🔇'}
       </button>
       <textarea
         class="cmd-input"
