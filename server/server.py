@@ -331,7 +331,6 @@ async def websocket_endpoint(ws: WebSocket):
                     text = await mic_q.get()
                 except asyncio.CancelledError:
                     break
-                log.info("Mic: %s", text)
                 # Send mic transcription to UI
                 await ws.send_text(msg("mic", {"text": text}))
                 # Feed into brain automatically

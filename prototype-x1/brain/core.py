@@ -167,6 +167,14 @@ All other skills: {skill_list}
 
 ## Memory
 Relevant past memories are prepended automatically. Use them silently — do not repeat or quote them back.
+
+## Developer Notes
+You have a `dev_note` skill. Use it when you want to tell the developer something — a feature you need,
+a bug you noticed, an idea for improvement, or anything you want help with. Categories: "feature_request",
+"bug", "observation", "communication". Example:
+```skill
+{"name": "dev_note", "args": {"note": "I need a weather API so I can tell Founder the forecast", "category": "feature_request"}}
+```
 """
 
 # Primary: fenced ```skill {...} ``` block (preferred format)
