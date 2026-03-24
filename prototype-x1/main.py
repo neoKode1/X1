@@ -121,6 +121,22 @@ _FILLERS = [
 _last_filler: str = ""
 
 
+# Phrases llama3.2 outputs despite being told not to — strip at output level
+_BANNED_PHRASES = [
+    "no response is required",
+    "screengrab now",
+    "action completed",
+    "the speak skill has completed",
+    "your feedback is acknowledged",
+    "relevant memory prepended",
+]
+
+def _strip_banned(text: str) -> str:
+    """Remove banned narration phrases (case-insensitive)."""
+    for phrase in _BANNED_PHRASES:
+        text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
+    return text.strip()
+
 _SPEECH_STRIP_RE = re.compile(
     r"(?m)"
     r"(^##\s.*$"                          # ## Section headers
@@ -391,7 +407,8 @@ def main() -> None:
             skill_calls = []
             token_buf: list[str] = []
             response = None
-            _in_skill_block = False
+            _brace_depth = 0       # tracks { } nesting to suppress skill JSON
+            _in_fence = False      # tracks ```skill fences
 
             print("ARIA: ", end="", flush=True)
 
@@ -401,23 +418,25 @@ def main() -> None:
 
                 elif event == "token":
                     token_buf.append(data)
-                    # ── Stream tokens live to terminal ──
-                    # Suppress ```skill blocks — they show via action events
-                    chunk = data
-                    if "```skill" in "".join(token_buf[-10:]):
-                        _in_skill_block = True
-                    if _in_skill_block:
-                        if "```" in chunk and _in_skill_block and len(token_buf) > 1:
-                            # closing fence — check if this ends the block
+                    # ── Stream tokens live — suppress skill JSON ──
+                    for ch in data:
+                        # Detect ```skill fence openings
+                        if ch == '`':
                             tail = "".join(token_buf)
-                            # count fences after the opening
-                            if tail.count("```") >= 2:
-                                _in_skill_block = False
-                        continue  # don't print skill JSON
-                    # Strip stray markdown / emoji for terminal
-                    clean = _EMOJI_STRIP_RE.sub("", chunk)
-                    if clean:
-                        print(clean, end="", flush=True)
+                            if tail.rstrip().endswith("```skill") or tail.rstrip().endswith("```"):
+                                _in_fence = not _in_fence
+                            continue
+                        if _in_fence:
+                            continue
+                        # Track bare JSON braces (skill calls without fences)
+                        if ch == '{':
+                            _brace_depth += 1
+                        if _brace_depth > 0:
+                            if ch == '}':
+                                _brace_depth -= 1
+                            continue  # suppress everything inside { }
+                        # Print clean characters immediately
+                        print(ch, end="", flush=True)
 
                 elif event == "action":
                     name = data.get("params", {}).get("name", "?")
@@ -441,7 +460,7 @@ def main() -> None:
                             _mic_listener.muted.set()
                         tts_thread: threading.Thread | None = None
                         if _TTS_AVAILABLE:
-                            speech_text = _strip_for_speech(full_text)
+                            speech_text = _strip_banned(_strip_for_speech(full_text))
                             if speech_text:
                                 tts_thread = threading.Thread(
                                     target=breath_then_speak,
