@@ -285,6 +285,7 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                 tts_q.put(leftover)
             tts_q.put(None)  # signal TTS worker to exit
         elif kind == "error":
+            log.error("Brain stream error: %s", data)
             tts_q.put(None)
             await ws.send_text(msg("error", {"message": data}))
             return True
@@ -319,6 +320,7 @@ async def websocket_endpoint(ws: WebSocket):
 
     # Start mic listener
     mic = _start_mic_listener()
+    _paused = False  # True = fully paused (no listening, no responding)
 
     # Send initial status
     await ws.send_text(status_msg("idle"))
@@ -376,6 +378,11 @@ async def websocket_endpoint(ws: WebSocket):
                 if not text:
                     continue
 
+                # ── Drop everything while paused ─────────────────────
+                if _paused:
+                    log.debug("Paused — dropping mic text: %r", text)
+                    continue
+
                 # ── Cancel any in-progress response ───────────────────
                 if processing:
                     log.info("New speech arrived — cancelling current response")
@@ -384,26 +391,34 @@ async def websocket_endpoint(ws: WebSocket):
                     # Give brain thread a moment to see the cancel
                     await asyncio.sleep(0.05)
 
-                # Send mic transcription to UI
-                await ws.send_text(msg("mic", {"text": text}))
+                try:
+                    # Send mic transcription to UI
+                    await ws.send_text(msg("mic", {"text": text}))
 
-                # Feed into brain
-                if brain:
-                    _cancel_brain.clear()
-                    stop_speaking.clear()
-                    processing = True
-                    await ws.send_text(status_msg("thinking"))
-                    completed = await _stream_brain(
-                        ws, brain, text, speaker="Neokode",
-                        stop_speaking=stop_speaking,
-                        mic_listener=mic,
-                        cancel_event=_cancel_brain,
-                    )
-                    processing = False
-                    if completed:
-                        await ws.send_text(status_msg("idle"))
+                    # Feed into brain
+                    if brain:
+                        log.info("Debounced input → brain: %r", text)
+                        _cancel_brain.clear()
+                        stop_speaking.clear()
+                        processing = True
+                        await ws.send_text(msg("thinking", {}))
+                        completed = await _stream_brain(
+                            ws, brain, text, speaker="Neokode",
+                            stop_speaking=stop_speaking,
+                            mic_listener=mic,
+                            cancel_event=_cancel_brain,
+                        )
+                        processing = False
+                        log.info("Brain stream finished — completed=%s", completed)
+                        if completed:
+                            await ws.send_text(status_msg("idle"))
+                        else:
+                            log.info("Response cancelled — ready for new input")
                     else:
-                        log.info("Response cancelled — ready for new input")
+                        log.warning("No brain available — mic text dropped: %r", text)
+                except Exception as exc:
+                    log.error("mic_relay brain error: %s", exc, exc_info=True)
+                    processing = False
 
         mic_task = asyncio.create_task(mic_relay())
 
@@ -440,20 +455,29 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_text(status_msg("idle"))
 
             elif kind == "pause":
-                # Stop TTS + mute mic + cancel brain
-                log.info("Pause received — killing TTS, cancelling brain, muting mic")
+                # Full stop: TTS + brain + mic listening
+                log.info("Pause received — killing TTS, cancelling brain, stopping listener")
+                _paused = True
                 stop_speaking.set()
                 _cancel_brain.set()
                 _kill_active_say()
                 if _mic_listener is not None:
                     _mic_listener.muted.set()
+                    # Drain any queued audio so it doesn't fire on resume
+                    try:
+                        while not _mic_listener._q.empty():
+                            _mic_listener._q.get_nowait()
+                    except Exception:
+                        pass
                 await ws.send_text(msg("tts", {"speaking": False}))
                 await ws.send_text(msg("mic", {"text": ""}))  # clear indicator
                 await ws.send_text(status_msg("idle", {"paused": True, "mic": False}))
 
             elif kind == "resume":
-                log.info("Resume received — unmuting mic")
+                log.info("Resume received — resuming listener")
+                _paused = False
                 stop_speaking.clear()
+                _cancel_brain.clear()
                 if _mic_listener is not None:
                     _mic_listener.muted.clear()
                 await ws.send_text(status_msg("idle", {"paused": False, "mic": True}))
