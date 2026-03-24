@@ -153,6 +153,7 @@ Wrap ALL skill calls in a fenced block — always:
 - `shell` — run a short safe shell command: `{{"name": "shell", "args": {{"command": "ls -la"}}}}`
 - `python` — run safe Python: `{{"name": "python", "args": {{"code": "print('hi')"}}}}`
 - `read_file` — `{{"name": "read_file", "args": {{"path": "relative/path"}}}}`
+- `web_fetch` — fetch a web page and read its text: `{{"name": "web_fetch", "args": {{"url": "https://example.com"}}}}`
 - `move` — `{{"name": "move", "args": {{"direction": "forward", "duration_ms": 500}}}}`
 - `bcs_report` — no args needed: `{{"name": "bcs_report", "args": {{}}}}`
 
