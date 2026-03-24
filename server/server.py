@@ -19,6 +19,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 # ── Brain path — prototype-x1 ─────────────────────────────────────────────────
@@ -513,6 +514,27 @@ async def websocket_endpoint(ws: WebSocket):
 @app.get("/health")
 def health():
     return {"ok": True, "brain_available": BRAIN_AVAILABLE, "uptime_s": int(time.time() - _start_time)}
+
+
+# ── Webcam snapshot endpoint ──────────────────────────────────────────────────
+@app.get("/webcam/snapshot")
+def webcam_snapshot():
+    """Return a single JPEG frame from the webcam. 204 if unavailable."""
+    try:
+        _root = str(BRAIN_PATH)
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        from vision.camera import capture_webcam  # type: ignore[import]
+        frame = capture_webcam(device=0, max_size=(320, 240))
+        if frame is None:
+            return Response(status_code=204)
+        import base64
+        jpg_bytes = base64.b64decode(frame.frame_b64)
+        return Response(content=jpg_bytes, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        log.warning("Webcam snapshot failed: %s", exc)
+        return Response(status_code=204)
 
 
 # ── Skill Builder REST API ─────────────────────────────────────────────────────

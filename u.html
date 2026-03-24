@@ -22,6 +22,25 @@
   @keyframes pulse { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
   #mute-indicator { transition: opacity 0.3s; }
   .cursor-blink::after { content: '▊'; animation: pulse 0.8s infinite; color: #facc15; }
+  /* Webcam preview */
+  #webcam-preview {
+    position: fixed; top: 16px; right: 16px; z-index: 200;
+    width: 180px; border-radius: 10px; overflow: hidden;
+    border: 2px solid rgba(250,204,21,0.4);
+    background: rgba(0,0,0,0.6); backdrop-filter: blur(8px);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    cursor: grab; user-select: none;
+    transition: opacity 0.4s, border-color 0.3s;
+  }
+  #webcam-preview:active { cursor: grabbing; }
+  #webcam-preview.no-feed { opacity: 0.3; border-color: rgba(248,113,113,0.5); }
+  #webcam-preview img { width: 100%; display: block; }
+  #webcam-status {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    font-family: monospace; font-size: 10px; text-align: center;
+    padding: 2px 0; color: #4ade80; background: rgba(0,0,0,0.6);
+  }
+  #webcam-status.off { color: #f87171; }
   #anim-container {
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
     transition: filter 0.08s ease-out, transform 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
@@ -58,6 +77,12 @@
   <div id="conn-dot" style="position:fixed;top:16px;left:16px;z-index:100;display:flex;align-items:center;gap:6px;pointer-events:none;">
     <span id="dot" style="width:8px;height:8px;border-radius:50%;background:#f87171;display:inline-block;"></span>
     <span id="conn-text" style="font-family:monospace;font-size:11px;color:#475569;"></span>
+  </div>
+
+  <!-- Webcam preview — draggable, top right -->
+  <div id="webcam-preview" class="no-feed">
+    <img id="webcam-img" src="" alt="webcam feed">
+    <div id="webcam-status" class="off">no feed</div>
   </div>
 
   <!-- Unicorn Studio SDK -->
@@ -302,6 +327,67 @@
     muteIndicator.style.opacity = '1';
     setTimeout(() => { muteIndicator.style.opacity = '0'; }, 1800);
   }
+
+  // ── Webcam preview polling + dragging ─────────────────────────
+  const wcPreview = document.getElementById('webcam-preview');
+  const wcImg = document.getElementById('webcam-img');
+  const wcStatus = document.getElementById('webcam-status');
+  let wcHasFeed = false;
+
+  async function pollWebcam() {
+    try {
+      const res = await fetch('http://localhost:8000/webcam/snapshot', { cache: 'no-store' });
+      if (res.ok && res.headers.get('content-type')?.includes('image')) {
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        wcImg.onload = () => URL.revokeObjectURL(url);
+        wcImg.src = url;
+        if (!wcHasFeed) {
+          wcHasFeed = true;
+          wcPreview.classList.remove('no-feed');
+          wcStatus.textContent = '● live';
+          wcStatus.className = '';
+          wcStatus.id = 'webcam-status';
+        }
+      } else {
+        if (wcHasFeed) {
+          wcHasFeed = false;
+          wcPreview.classList.add('no-feed');
+          wcStatus.textContent = 'no feed';
+          wcStatus.className = 'off';
+          wcStatus.id = 'webcam-status';
+        }
+      }
+    } catch {
+      if (wcHasFeed) {
+        wcHasFeed = false;
+        wcPreview.classList.add('no-feed');
+        wcStatus.textContent = 'no feed';
+        wcStatus.className = 'off';
+        wcStatus.id = 'webcam-status';
+      }
+    }
+  }
+  setInterval(pollWebcam, 2000);
+  pollWebcam();
+
+  // Drag logic
+  let dragging = false, dragOffX = 0, dragOffY = 0;
+  wcPreview.addEventListener('mousedown', (e) => {
+    dragging = true;
+    dragOffX = e.clientX - wcPreview.getBoundingClientRect().left;
+    dragOffY = e.clientY - wcPreview.getBoundingClientRect().top;
+    e.preventDefault(); e.stopPropagation();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    wcPreview.style.left = (e.clientX - dragOffX) + 'px';
+    wcPreview.style.top = (e.clientY - dragOffY) + 'px';
+    wcPreview.style.right = 'auto';
+  });
+  document.addEventListener('mouseup', () => { dragging = false; });
+  // Prevent drag from triggering mute toggle
+  wcPreview.addEventListener('click', (e) => { e.stopPropagation(); });
 
   connect();
   </script>
