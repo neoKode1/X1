@@ -20,7 +20,7 @@ def _try_ollama(cfg: "LLMConfig", messages: list[Message]) -> str | None:
         resp = ollama.chat(
             model=cfg.ollama_model,
             messages=messages,
-            options={"temperature": cfg.temperature, "num_predict": cfg.max_tokens},
+            options={"temperature": cfg.temperature, "num_predict": cfg.max_tokens, "num_ctx": 4096},
         )
         return resp["message"]["content"]
     except Exception as e:
@@ -66,7 +66,7 @@ def stream_llm(cfg: "LLMConfig", messages: list[Message]):
             model=cfg.ollama_model,
             messages=messages,
             stream=True,
-            options={"temperature": cfg.temperature, "num_predict": cfg.max_tokens},
+            options={"temperature": cfg.temperature, "num_predict": cfg.max_tokens, "num_ctx": 4096},
         )
         for chunk in stream:
             token = chunk.get("message", {}).get("content", "")
