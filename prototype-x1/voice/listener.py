@@ -17,7 +17,7 @@ CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_MS / 1000)
 SILENCE_THRESHOLD = 0.025  # RMS below this = silence (raised from 0.01 to reject ambient noise)
 SILENCE_CHUNKS = 8         # ~1.6s of silence = end of utterance (faster cutoff)
 MIN_SPEECH_CHUNKS = 4      # ignore clips shorter than ~800ms
-MAX_BUFFER_CHUNKS = 50     # cap at ~10s — prevents 30s+ noise accumulation
+MAX_BUFFER_CHUNKS = 150    # cap at ~30s — allows longer speech before forced flush
 
 # Whisper-tiny hallucinates these phrases on ambient noise / silence
 _HALLUCINATION_PHRASES = {
@@ -58,10 +58,12 @@ def _is_hallucination(text: str) -> bool:
         most_common_count = counts.most_common(1)[0][1]
         if most_common_count / len(sentences) > 0.6:
             return True
-    # Reject if >70% of words are unique but the text makes no coherent sense
-    # (heuristic: very long transcriptions from silence tend to be nonsensical)
-    if len(words) > 15 and len(sentences) >= 3:
-        return True  # ambient noise rarely produces 15+ real words
+    # Reject nonsensical long transcriptions from silence — but only if very short
+    # words dominate (real speech has variety in word length)
+    if len(words) > 30 and len(sentences) >= 5:
+        avg_word_len = sum(len(w) for w in words) / len(words)
+        if avg_word_len < 3.0:
+            return True  # likely noise — real speech has longer average words
     return False
 
 
