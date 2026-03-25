@@ -107,7 +107,7 @@ def skill_look_servo(pan: int = 0, tilt: int = 0) -> str:
 def skill_speak(text: str) -> str:
     """Speak text aloud using espeak (Pi) or say (macOS)."""
     import subprocess, shlex
-    for cmd in (["espeak", text], ["say", text]):
+    for cmd in (["espeak", text], ["say", "-v", "Flo", text]):
         try:
             subprocess.run(cmd, timeout=30, check=True,
                            capture_output=True)

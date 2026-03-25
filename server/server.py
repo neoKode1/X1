@@ -19,7 +19,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 # ── Brain path — prototype-x1 ─────────────────────────────────────────────────
@@ -53,7 +53,7 @@ log = logging.getLogger("x1.server")
 app = FastAPI(title="X1 Brain Bridge", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:4173", "http://localhost:3000"],
+    allow_origins=["*"],  # local dev — file:// and any localhost port
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,46 +73,20 @@ def get_brain():
     return _brain
 
 # ── TTS engine ────────────────────────────────────────────────────────────────
+_SAY_VOICE = "Flo"
 _SAY_RATE = "210"
 _HAS_SAY = shutil.which("say") is not None
 _active_say_proc: "subprocess.Popen[bytes] | None" = None
 _proc_lock = threading.Lock()
 
-# Phrases llama3.2 outputs despite being told not to
-_BANNED_PHRASES = [
-    "no response is required", "screengrab now", "action completed",
-    "the speak skill has completed", "your feedback is acknowledged",
-    "relevant memory prepended",
-]
-
-def _strip_banned(text: str) -> str:
-    for phrase in _BANNED_PHRASES:
-        text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
-    return text.strip()
-
-def _strip_bare_json(text: str) -> str:
-    """Remove bare JSON skill-call objects from text, handling nested braces."""
-    result = []
-    i = 0
-    while i < len(text):
-        if text[i] == '{':
-            depth = 0
-            j = i
-            while j < len(text):
-                if text[j] == '{':
-                    depth += 1
-                elif text[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        i = j + 1
-                        break
-                j += 1
-            else:
-                i = j
-            continue
-        result.append(text[i])
-        i += 1
-    return "".join(result)
+# Centralized text filters — imported from brain.filters
+try:
+    from brain.filters import strip_banned as _strip_banned, strip_bare_json as _strip_bare_json, clean_response as _clean_response
+except ImportError:
+    # Minimal fallback if brain module not available
+    def _strip_banned(text: str) -> str: return text
+    def _strip_bare_json(text: str) -> str: return text
+    def _clean_response(text: str) -> str: return text
 
 def _kill_active_say() -> None:
     """Kill running `say` process immediately. Safe to call from any thread."""
@@ -134,7 +108,7 @@ def _speak_sentence(sentence: str, stop: threading.Event) -> None:
     sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
     if not sentence or stop.is_set():
         return
-    proc = subprocess.Popen(["say", "-r", _SAY_RATE, sentence])
+    proc = subprocess.Popen(["say", "-v", _SAY_VOICE, "-r", _SAY_RATE, sentence])
     with _proc_lock:
         _active_say_proc = proc
     proc.wait()
@@ -197,8 +171,11 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
     stop_ev = stop_speaking or threading.Event()
 
     def tts_worker():
-        if mic_listener is not None:
+        # Only auto-mute mic if it wasn't already muted (e.g. user pause)
+        _we_muted = False
+        if mic_listener is not None and not mic_listener.muted.is_set():
             mic_listener.muted.set()
+            _we_muted = True
         try:
             while True:
                 sentence = tts_q.get()
@@ -213,7 +190,8 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                 except Exception:
                     pass
         finally:
-            if mic_listener is not None:
+            # Only re-enable mic if WE muted it (not if user paused)
+            if mic_listener is not None and _we_muted:
                 time.sleep(0.3)
                 mic_listener.muted.clear()
             try:
@@ -321,6 +299,7 @@ def _start_mic_listener():
 # ── WebSocket handler ─────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    global _mic_listener
     await ws.accept()
     log.info("Client connected: %s", ws.client)
     brain = get_brain()
@@ -463,7 +442,7 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_text(status_msg("idle"))
 
             elif kind == "pause":
-                # Full stop: TTS + brain + mic listening
+                # Full stop: TTS + brain + mic listening — hard interrupt
                 log.info("Pause received — killing TTS, cancelling brain, stopping listener")
                 _paused = True
                 stop_speaking.set()
@@ -471,12 +450,7 @@ async def websocket_endpoint(ws: WebSocket):
                 _kill_active_say()
                 if _mic_listener is not None:
                     _mic_listener.muted.set()
-                    # Drain any queued audio so it doesn't fire on resume
-                    try:
-                        while not _mic_listener._q.empty():
-                            _mic_listener._q.get_nowait()
-                    except Exception:
-                        pass
+                    _mic_listener.flush()  # drain queued audio
                 await ws.send_text(msg("tts", {"speaking": False}))
                 await ws.send_text(msg("mic", {"text": ""}))  # clear indicator
                 await ws.send_text(status_msg("idle", {"paused": True, "mic": False}))
@@ -487,8 +461,43 @@ async def websocket_endpoint(ws: WebSocket):
                 stop_speaking.clear()
                 _cancel_brain.clear()
                 if _mic_listener is not None:
+                    _mic_listener.flush()  # clear stale audio before resuming
                     _mic_listener.muted.clear()
                 await ws.send_text(status_msg("idle", {"paused": False, "mic": True}))
+
+            elif kind == "vision":
+                # Face/expression data from MediaPipe in-browser detection
+                payload = data.get("payload", {})
+                face_present = payload.get("face", False)
+                expressions = payload.get("expressions", {})
+                frame_b64 = payload.get("frame")  # base64 JPEG from browser
+                log.info("Vision: face=%s expressions=%s frame=%s",
+                         face_present,
+                         {k: round(v, 2) for k, v in expressions.items()} if expressions else {},
+                         f"{len(frame_b64)}chars" if frame_b64 else "none")
+                brain = get_brain()
+                if brain is not None:
+                    # Derive mood from expressions
+                    smile = (expressions.get("mouthSmileLeft", 0) + expressions.get("mouthSmileRight", 0)) / 2
+                    frown = (expressions.get("mouthFrownLeft", 0) + expressions.get("mouthFrownRight", 0)) / 2
+                    brow_up = expressions.get("browInnerUp", 0)
+                    jaw_open = expressions.get("jawOpen", 0)
+                    if smile > 0.4:
+                        mood = "smiling"
+                    elif frown > 0.3:
+                        mood = "frowning"
+                    elif brow_up > 0.4:
+                        mood = "surprised"
+                    elif jaw_open > 0.5:
+                        mood = "mouth open / talking"
+                    else:
+                        mood = "neutral"
+                    brain.update_vision(
+                        state={"face_present": face_present, "expressions": expressions, "ts": time.time()},
+                        frame_b64=frame_b64,
+                        mood=mood,
+                    )
+                    log.info("Vision mood: %s", mood)
 
     except WebSocketDisconnect:
         log.info("Client disconnected")
@@ -509,6 +518,17 @@ async def websocket_endpoint(ws: WebSocket):
             _mic_listener.stop()
             _mic_listener._listening = False
             _mic_listener._stop.clear()  # reset for next connection
+            _mic_listener = None  # force fresh instance on next connection
+
+# ── Serve UI ──────────────────────────────────────────────────────────────────
+UI_HTML = Path(__file__).parent.parent / "u.html"
+
+@app.get("/")
+def serve_ui():
+    """Serve the main UI page."""
+    if UI_HTML.exists():
+        return FileResponse(UI_HTML, media_type="text/html")
+    raise HTTPException(status_code=404, detail="u.html not found")
 
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health")

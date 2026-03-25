@@ -55,6 +55,7 @@ def _kill_active_say() -> None:
 
 if _shutil.which("say"):
     # macOS — subprocess `say`, works from any thread
+    _SAY_VOICE = "Flo"
     _SAY_RATE = "210"  # WPM — 150 was sluggish, 210 feels natural-fast
 
     def speak(text: str, stop: "threading.Event | None" = None) -> None:
@@ -68,7 +69,7 @@ if _shutil.which("say"):
                 continue
             if stop and stop.is_set():
                 return
-            proc = _subprocess.Popen(["say", "-r", _SAY_RATE, sentence])
+            proc = _subprocess.Popen(["say", "-v", _SAY_VOICE, "-r", _SAY_RATE, sentence])
             with _proc_lock:
                 _active_say_proc = proc
             proc.wait()
@@ -84,7 +85,7 @@ if _shutil.which("say"):
         sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
         if not sentence or (stop and stop.is_set()):
             return
-        proc = _subprocess.Popen(["say", "-r", _SAY_RATE, sentence])
+        proc = _subprocess.Popen(["say", "-v", _SAY_VOICE, "-r", _SAY_RATE, sentence])
         with _proc_lock:
             _active_say_proc = proc
         proc.wait()

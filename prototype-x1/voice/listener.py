@@ -14,10 +14,11 @@ log = logging.getLogger("x1.listener")
 SAMPLE_RATE = 16000
 CHUNK_MS = 200          # ms per audio chunk
 CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_MS / 1000)
-SILENCE_THRESHOLD = 0.025  # RMS below this = silence (raised from 0.01 to reject ambient noise)
+SILENCE_THRESHOLD = 0.03   # RMS below this = silence (raised from 0.025 to reject ambient noise)
 SILENCE_CHUNKS = 8         # ~1.6s of silence = end of utterance (faster cutoff)
-MIN_SPEECH_CHUNKS = 4      # ignore clips shorter than ~800ms
+MIN_SPEECH_CHUNKS = 6      # ignore clips shorter than ~1.2s (raised from 4 to reject noise bursts)
 MAX_BUFFER_CHUNKS = 150    # cap at ~30s — allows longer speech before forced flush
+MIN_TRANSCRIBE_GAP = 1.5   # minimum seconds between transcriptions to prevent rapid-fire
 
 # Whisper-tiny hallucinates these phrases on ambient noise / silence
 _HALLUCINATION_PHRASES = {
@@ -27,43 +28,56 @@ _HALLUCINATION_PHRASES = {
     "subs by", "subtitles by", "amara.org", "you",
     "i'm sorry", "birth certificate", "taxid", "tax id",
     "i'm going to be a physician", "i'm not going to be a",
+    "mam", "mom", "aah", "ugh", "hmm", "umm", "mmm", "uh",
+    "oh", "ah", "huh", "um", "mm", "shh",
 }
 
 import re as _re
 
 def _is_hallucination(text: str) -> bool:
     """Reject known Whisper hallucination patterns."""
-    t = text.lower().strip().rstrip(".")
+    t = text.lower().strip().rstrip(".!?,")
     if len(t) < 3:
         return True
+    # Strip all punctuation for content checks
+    alpha_only = _re.sub(r'[^a-z ]', '', t).strip()
+    if len(alpha_only) < 2:
+        return True  # only punctuation/symbols
     if t in _HALLUCINATION_PHRASES:
         return True
     for phrase in _HALLUCINATION_PHRASES:
         if t == phrase or t.startswith(phrase):
             return True
+    # Reject repetitive-character patterns: "mmmm", "aaahh", "ummmmm"
+    # If >60% of alpha chars are the same letter, it's noise
+    if alpha_only:
+        no_spaces = alpha_only.replace(" ", "")
+        if len(no_spaces) >= 2:
+            from collections import Counter
+            char_counts = Counter(no_spaces)
+            most_common_char, most_common_n = char_counts.most_common(1)[0]
+            if most_common_n / len(no_spaces) > 0.6:
+                return True  # "mmmm", "aaahh", "ummm" etc.
     # Reject pure repetition: "word word word word"
     words = t.split()
     if len(words) >= 3 and len(set(words)) == 1:
         return True
     # Reject repeated phrases: "I'm sorry. I'm sorry. I'm sorry."
-    # Split on sentence boundaries and check for repeated sentences
     sentences = [s.strip().rstrip(".!?").strip() for s in _re.split(r'[.!?]+', t) if s.strip()]
     if len(sentences) >= 2:
         unique = set(sentences)
         if len(unique) == 1:
             return True
-        # >60% of sentences are the same phrase — likely hallucination
-        from collections import Counter
-        counts = Counter(sentences)
+        from collections import Counter as SCounter
+        counts = SCounter(sentences)
         most_common_count = counts.most_common(1)[0][1]
         if most_common_count / len(sentences) > 0.6:
             return True
-    # Reject nonsensical long transcriptions from silence — but only if very short
-    # words dominate (real speech has variety in word length)
+    # Reject nonsensical long transcriptions from silence
     if len(words) > 30 and len(sentences) >= 5:
         avg_word_len = sum(len(w) for w in words) / len(words)
         if avg_word_len < 3.0:
-            return True  # likely noise — real speech has longer average words
+            return True
     return False
 
 
@@ -148,12 +162,17 @@ class MicListener:
             return
         self._listening = True
         import sounddevice as sd
+        import time as _time
         self._load_model()
+
+        # Drain any stale audio accumulated while model was loading / idle
+        self.flush()
         log.info("Mic open — listening.")
 
         buffer: list[np.ndarray] = []
         silence_count = 0
         speaking = False
+        last_yield_time = 0.0  # cooldown to prevent rapid-fire transcriptions
 
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
                             dtype="float32", blocksize=CHUNK_SAMPLES,
@@ -173,6 +192,13 @@ class MicListener:
                     speaking = True
                     # Cap buffer to prevent 30s+ noise accumulation
                     if len(buffer) > MAX_BUFFER_CHUNKS:
+                        now = _time.monotonic()
+                        if now - last_yield_time < MIN_TRANSCRIBE_GAP:
+                            log.debug("Cooldown — skipping capped buffer")
+                            buffer.clear()
+                            silence_count = 0
+                            speaking = False
+                            continue
                         audio = np.concatenate(buffer)
                         rms_total = float(np.sqrt(np.mean(audio ** 2)))
                         if rms_total > SILENCE_THRESHOLD:
@@ -181,7 +207,10 @@ class MicListener:
                             text = self._transcribe(audio)
                             if text and not _is_hallucination(text):
                                 log.info("Mic: %s", text)
+                                last_yield_time = _time.monotonic()
                                 yield text
+                            else:
+                                log.debug("Rejected (hallucination): %r", text)
                         buffer.clear()
                         silence_count = 0
                         speaking = False
@@ -190,6 +219,13 @@ class MicListener:
                     buffer.append(chunk)
                     if silence_count >= SILENCE_CHUNKS:
                         if len(buffer) >= MIN_SPEECH_CHUNKS:
+                            now = _time.monotonic()
+                            if now - last_yield_time < MIN_TRANSCRIBE_GAP:
+                                log.debug("Cooldown — skipping utterance")
+                                buffer.clear()
+                                silence_count = 0
+                                speaking = False
+                                continue
                             audio = np.concatenate(buffer)
                             rms_total = float(np.sqrt(np.mean(audio ** 2)))
                             if rms_total > SILENCE_THRESHOLD:
@@ -198,10 +234,25 @@ class MicListener:
                                 text = self._transcribe(audio)
                                 if text and not _is_hallucination(text):
                                     log.info("Mic: %s", text)
+                                    last_yield_time = _time.monotonic()
                                     yield text
+                                else:
+                                    log.debug("Rejected (hallucination): %r", text)
                         buffer.clear()
                         silence_count = 0
                         speaking = False
+
+    def flush(self) -> None:
+        """Drain the audio queue so stale audio doesn't fire on resume."""
+        drained = 0
+        try:
+            while not self._q.empty():
+                self._q.get_nowait()
+                drained += 1
+        except Exception:
+            pass
+        if drained:
+            log.debug("Flushed %d audio chunks from queue", drained)
 
     def stop(self) -> None:
         self._stop.set()
