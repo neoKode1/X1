@@ -31,6 +31,8 @@ class MemoryConfig:
     enabled: bool = field(default_factory=lambda: os.getenv("MEMORY_ENABLED", "true").lower() != "false")
     persist_dir: str = field(default_factory=lambda: os.getenv(
         "MEMORY_DIR", str(Path(__file__).parent.parent / "memory" / "chroma")))
+    db_path: str = field(default_factory=lambda: os.getenv(
+        "CONVERSATION_DB", str(Path(__file__).parent.parent / "memory" / "conversations.db")))
     collection: str = "x1_episodic"
     top_k: int = 5
 
