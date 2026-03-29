@@ -18,16 +18,27 @@ log = logging.getLogger("x1.llm")
 
 Message = dict  # {"role": ..., "content": str, "images"?: list[str]}
 
+# Persistent HTTP session for Ollama — reuses TCP connections across calls
+_ollama_session: "import('requests').Session | None" = None
+
+def _get_ollama_session():
+    """Get or create a persistent requests.Session for Ollama connection pooling."""
+    global _ollama_session
+    if _ollama_session is None:
+        import requests as _requests
+        _ollama_session = _requests.Session()
+    return _ollama_session
+
 
 def _try_ollama(cfg: "LLMConfig", messages: list[Message]) -> str | None:
     """Non-streaming Ollama call via raw HTTP (bypasses broken ollama library think=False)."""
     try:
-        import requests as _requests
         import json as _json
 
+        session = _get_ollama_session()
         base_url = cfg.ollama_host.rstrip("/")
         url = f"{base_url}/api/chat"
-        resp = _requests.post(url, json={
+        resp = session.post(url, json={
             "model": cfg.ollama_model,
             "messages": messages,
             "stream": False,
@@ -87,14 +98,14 @@ def _ollama_stream_attempt(cfg: "LLMConfig", messages: list[Message],
     Raises on connection / HTTP errors.
     """
     import time as _time
-    import requests as _requests
     import json as _json
 
+    session = _get_ollama_session()
     base_url = cfg.ollama_host.rstrip("/")
     url = f"{base_url}/api/chat"
     t0 = _time.monotonic()
 
-    resp = _requests.post(url, json={
+    resp = session.post(url, json={
         "model": cfg.ollama_model,
         "messages": messages,
         "stream": True,
@@ -160,7 +171,7 @@ class _ThinkingTimeout(Exception):
 
 _MINIMAL_SYSTEM = (
     "You are ARIA, a cyberpunk robot. Neokode is your founder. "
-    "Answer in 1-2 sentences. Be direct."
+    "Answer in 1-2 sentences. Be direct. /no_think"
 )
 
 
@@ -177,11 +188,11 @@ def stream_llm(cfg: "LLMConfig", messages: list[Message]):
     thinking for >25s, abort and retry with a minimal prompt (system + user
     only, no history/memories). If that also fails, fall back to cloud.
     """
-    # Attempt 1: full context, moderate thinking budget (20s)
-    # If the model can answer with full context, it usually does within 20s.
+    # Attempt 1: full context, tight thinking budget (12s)
+    # Casual chat on 8B should produce content tokens within 12s.
     # If not, the minimal prompt retry is faster than waiting longer.
     try:
-        yield from _ollama_stream_attempt(cfg, messages, think_timeout_sec=20)
+        yield from _ollama_stream_attempt(cfg, messages, think_timeout_sec=12)
         return
     except _ThinkingTimeout as e:
         log.warning("⏱ Thinking timeout (attempt 1): %d chars in %.1fs — retrying minimal",
@@ -190,12 +201,12 @@ def stream_llm(cfg: "LLMConfig", messages: list[Message]):
         log.warning("Ollama streaming failed (attempt 1): %s", e)
         # Fall through to retry below
 
-    # Attempt 2: minimal prompt + low temp + generous thinking budget (45s)
+    # Attempt 2: minimal prompt + low temp + moderate thinking budget (25s)
     try:
         minimal = _strip_to_minimal(messages)
         log.info("⏱ Retry with minimal prompt (%d messages), temp=0.15", len(minimal))
-        yield from _ollama_stream_attempt(cfg, minimal, timeout_sec=90,
-                                          think_timeout_sec=45, temperature=0.15)
+        yield from _ollama_stream_attempt(cfg, minimal, timeout_sec=60,
+                                          think_timeout_sec=25, temperature=0.15)
         return
     except _ThinkingTimeout as e:
         log.warning("⏱ Thinking timeout (attempt 2): %d chars in %.1fs — cloud fallback",

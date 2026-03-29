@@ -73,11 +73,28 @@ def get_brain():
     return _brain
 
 # ── TTS engine ────────────────────────────────────────────────────────────────
-_SAY_VOICE = "Flo"
-_SAY_RATE = "210"
-_HAS_SAY = shutil.which("say") is not None
+# Neural TTS via edge-tts (Microsoft neural voices) with afplay fallback
+_EDGE_TTS_VOICE = os.getenv("TTS_VOICE", "en-US-AvaMultilingualNeural")
 _active_say_proc: "subprocess.Popen[bytes] | None" = None
 _proc_lock = threading.Lock()
+
+# Check for edge-tts availability, fall back to macOS say
+try:
+    import edge_tts  # noqa: F401
+    _HAS_EDGE_TTS = True
+except ImportError:
+    _HAS_EDGE_TTS = False
+
+_HAS_SAY = shutil.which("say") is not None
+_HAS_AFPLAY = shutil.which("afplay") is not None
+_TTS_AVAILABLE = _HAS_EDGE_TTS or _HAS_SAY
+
+if _HAS_EDGE_TTS:
+    log.info("TTS: edge-tts available — using neural voice %s", _EDGE_TTS_VOICE)
+elif _HAS_SAY:
+    log.info("TTS: edge-tts not found, falling back to macOS say")
+else:
+    log.warning("TTS: no TTS engine available")
 
 # Centralized text filters — imported from brain.filters
 try:
@@ -89,7 +106,7 @@ except ImportError:
     def _clean_response(text: str) -> str: return text
 
 def _kill_active_say() -> None:
-    """Kill running `say` process immediately. Safe to call from any thread."""
+    """Kill running audio playback process immediately. Safe to call from any thread."""
     global _active_say_proc
     with _proc_lock:
         proc = _active_say_proc
@@ -100,21 +117,87 @@ def _kill_active_say() -> None:
         except OSError:
             pass
 
-def _speak_sentence(sentence: str, stop: threading.Event) -> None:
-    """Speak a single sentence via macOS `say`. Skips if stop is set."""
+# Persistent event loop for edge-tts (avoids asyncio.run() per sentence)
+_tts_loop: asyncio.AbstractEventLoop | None = None
+_tts_loop_thread: threading.Thread | None = None
+
+def _get_tts_loop() -> asyncio.AbstractEventLoop:
+    """Get or create a persistent event loop running in a background thread."""
+    global _tts_loop, _tts_loop_thread
+    if _tts_loop is not None and _tts_loop.is_running():
+        return _tts_loop
+    _tts_loop = asyncio.new_event_loop()
+    def _run():
+        asyncio.set_event_loop(_tts_loop)
+        _tts_loop.run_forever()
+    _tts_loop_thread = threading.Thread(target=_run, daemon=True)
+    _tts_loop_thread.start()
+    return _tts_loop
+
+def _speak_sentence_edge(sentence: str, stop: threading.Event) -> None:
+    """Speak via edge-tts neural voice. Generates temp mp3, plays with afplay."""
+    global _active_say_proc
+    import tempfile
+    import concurrent.futures
+    sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
+    if not sentence or stop.is_set():
+        return
+    # Generate audio to temp file
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        import edge_tts as _edge
+        # Reuse persistent event loop — much faster than asyncio.run() per sentence
+        loop = _get_tts_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            _edge.Communicate(sentence, _EDGE_TTS_VOICE).save(tmp_path), loop
+        )
+        future.result(timeout=15)  # 15s max for TTS generation
+        if stop.is_set():
+            return
+        # Play with afplay (macOS) or aplay (Linux)
+        player = "afplay" if _HAS_AFPLAY else "aplay"
+        proc = subprocess.Popen([player, tmp_path])
+        with _proc_lock:
+            _active_say_proc = proc
+        proc.wait()
+        with _proc_lock:
+            if _active_say_proc is proc:
+                _active_say_proc = None
+    except Exception as e:
+        log.warning("edge-tts failed: %s — falling back to say", e)
+        if _HAS_SAY:
+            _speak_sentence_say(sentence, stop)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+def _speak_sentence_say(sentence: str, stop: threading.Event) -> None:
+    """Fallback: speak via macOS `say`."""
     global _active_say_proc
     if not _HAS_SAY:
         return
     sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
     if not sentence or stop.is_set():
         return
-    proc = subprocess.Popen(["say", "-v", _SAY_VOICE, "-r", _SAY_RATE, sentence])
+    proc = subprocess.Popen(["say", "-v", "Flo", "-r", "210", sentence])
     with _proc_lock:
         _active_say_proc = proc
     proc.wait()
     with _proc_lock:
-        if _active_say_proc is proc:     # only clear if WE still own it
+        if _active_say_proc is proc:
             _active_say_proc = None
+
+def _speak_sentence(sentence: str, stop: threading.Event) -> None:
+    """Speak a single sentence. Uses edge-tts if available, else macOS say."""
+    if _HAS_EDGE_TTS:
+        _speak_sentence_edge(sentence, stop)
+    elif _HAS_SAY:
+        _speak_sentence_say(sentence, stop)
+    # else: no TTS available, silently skip
 
 # ── Message helpers ───────────────────────────────────────────────────────────
 def msg(kind: str, payload: Any) -> str:
@@ -134,7 +217,7 @@ def status_msg(state: str, extra: dict | None = None) -> str:
         "uptime_s": int(time.time() - _start_time),
         "skills": brain.skill_list if brain else [],
         "mic": MIC_AVAILABLE,
-        "tts": _HAS_SAY,
+        "tts": _TTS_AVAILABLE,
     }
     if extra:
         payload.update(extra)
@@ -200,7 +283,7 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
             except Exception:
                 pass
 
-    if _HAS_SAY:
+    if _TTS_AVAILABLE:
         threading.Thread(target=tts_worker, daemon=True).start()
 
     final_response: dict | None = None

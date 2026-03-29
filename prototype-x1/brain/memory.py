@@ -66,14 +66,16 @@ class EpisodicMemory:
                     last_ts = turns[-1]["ts"]
                     age_min = (time.time() - last_ts) / 60
                     if age_min < 30:
-                        # Resume — reload turns into short-term memory
-                        for t in turns:
+                        # Resume — reload only the last few turns to keep context small
+                        # (full history stays in SQLite for browsing, but LLM only sees recent)
+                        max_reload = min(len(turns), 4)  # max 4 turns (2 exchanges)
+                        for t in turns[-max_reload:]:
                             self._log.append(MemoryEntry(
                                 role=t["role"], text=t["content"], ts=t["ts"]
                             ))
                         self._conversation_id = last_id
-                        log.info("Resumed conversation %s (%d turns, %.0f min ago)",
-                                 last_id[:8], len(turns), age_min)
+                        log.info("Resumed conversation %s (%d/%d turns, %.0f min ago)",
+                                 last_id[:8], max_reload, len(turns), age_min)
                         return
 
             # Start fresh conversation
@@ -112,10 +114,8 @@ class EpisodicMemory:
         if not self._collection or not query.strip():
             return []
         try:
-            count = self._collection.count()
-            if count == 0:
-                return []
-            results = self._collection.query(query_texts=[query], n_results=min(k, count))
+            # Query directly — ChromaDB handles empty collections gracefully
+            results = self._collection.query(query_texts=[query], n_results=k)
             entries = []
             for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
                 entries.append(MemoryEntry(

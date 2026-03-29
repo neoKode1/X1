@@ -28,9 +28,9 @@ from .bcs import BCSTracker
 log = logging.getLogger("x1.core")
 
 # ── System prompt ──────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = "You are ARIA, a cyberpunk robot. Neokode is your founder. Answer in 1-2 sentences."
+SYSTEM_PROMPT = "You are ARIA, a cyberpunk robot. Neokode is your founder. Answer in 1-2 sentences. /no_think"
 
-SYSTEM_PROMPT_WITH_SKILLS = """You are ARIA, a cyberpunk robot. Neokode is your founder.
+SYSTEM_PROMPT_WITH_SKILLS = """You are ARIA, a cyberpunk robot. Neokode is your founder. /no_think
 RULES: 1) Casual talk=short answer, NO skills. 2) 1-2 sentences max. 3) Max 2 skills, only when asked.
 Skill format: ```skill\n{{"name":"X","args":{{}}}}\n```
 Skills: {skill_list}"""
@@ -74,12 +74,17 @@ class Brain:
         self._load_external_skills()
         self._register_trust_skills()
         self._register_bcs_skills()
-        # Hardware awareness — probed once at boot, injected as context every turn
-        self._hw_webcam: bool = self._probe_webcam()
-        log.info("Brain ready — name=%s ollama=%s/%s fallback=%s | BCS=%s webcam=%s",
+        # Hardware awareness — probed in background thread to avoid blocking startup
+        self._hw_webcam: bool = False
+        import threading as _threading
+        def _bg_probe():
+            self._hw_webcam = self._probe_webcam()
+            log.debug("Webcam probe result: %s", self._hw_webcam)
+        _threading.Thread(target=_bg_probe, daemon=True).start()
+        log.info("Brain ready — name=%s ollama=%s/%s fallback=%s | BCS=%s",
                  self.cfg.name, self.cfg.llm.ollama_host,
                  self.cfg.llm.ollama_model, self.cfg.llm.cloud_fallback,
-                 self.bcs.state.summary(), self._hw_webcam)
+                 self.bcs.state.summary())
 
     @staticmethod
     def _probe_webcam() -> bool:
