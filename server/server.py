@@ -134,44 +134,48 @@ def _get_tts_loop() -> asyncio.AbstractEventLoop:
     _tts_loop_thread.start()
     return _tts_loop
 
-def _speak_sentence_edge(sentence: str, stop: threading.Event) -> None:
-    """Speak via edge-tts neural voice. Generates temp mp3, plays with afplay."""
-    global _active_say_proc
+def _generate_audio_edge(sentence: str) -> str | None:
+    """Generate audio file via edge-tts. Returns temp file path or None."""
     import tempfile
-    import concurrent.futures
     sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
-    if not sentence or stop.is_set():
-        return
-    # Generate audio to temp file
+    if not sentence:
+        return None
     tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
     tmp_path = tmp.name
     tmp.close()
     try:
         import edge_tts as _edge
-        # Reuse persistent event loop — much faster than asyncio.run() per sentence
         loop = _get_tts_loop()
         future = asyncio.run_coroutine_threadsafe(
             _edge.Communicate(sentence, _EDGE_TTS_VOICE).save(tmp_path), loop
         )
-        future.result(timeout=15)  # 15s max for TTS generation
-        if stop.is_set():
-            return
-        # Play with afplay (macOS) or aplay (Linux)
+        future.result(timeout=15)
+        return tmp_path
+    except Exception as e:
+        log.warning("edge-tts generation failed: %s", e)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return None
+
+def _play_audio_file(path: str, stop: threading.Event) -> None:
+    """Play an audio file and clean it up afterwards."""
+    global _active_say_proc
+    if stop.is_set():
+        return
+    try:
         player = "afplay" if _HAS_AFPLAY else "aplay"
-        proc = subprocess.Popen([player, tmp_path])
+        proc = subprocess.Popen([player, path])
         with _proc_lock:
             _active_say_proc = proc
         proc.wait()
         with _proc_lock:
             if _active_say_proc is proc:
                 _active_say_proc = None
-    except Exception as e:
-        log.warning("edge-tts failed: %s — falling back to say", e)
-        if _HAS_SAY:
-            _speak_sentence_say(sentence, stop)
     finally:
         try:
-            os.unlink(tmp_path)
+            os.unlink(path)
         except OSError:
             pass
 
@@ -194,7 +198,11 @@ def _speak_sentence_say(sentence: str, stop: threading.Event) -> None:
 def _speak_sentence(sentence: str, stop: threading.Event) -> None:
     """Speak a single sentence. Uses edge-tts if available, else macOS say."""
     if _HAS_EDGE_TTS:
-        _speak_sentence_edge(sentence, stop)
+        audio_path = _generate_audio_edge(sentence)
+        if audio_path:
+            _play_audio_file(audio_path, stop)
+        elif _HAS_SAY:
+            _speak_sentence_say(sentence, stop)
     elif _HAS_SAY:
         _speak_sentence_say(sentence, stop)
     # else: no TTS available, silently skip
@@ -249,31 +257,60 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
 
     threading.Thread(target=run_in_thread, daemon=True).start()
 
-    # TTS: sentence-level streaming — speak as sentences complete mid-stream
+    # TTS: pipelined — generate audio ahead while playing current sentence
     tts_q: "queue.Queue[str | None]" = queue.Queue()
+    # audio_q holds pre-generated file paths (or None = done sentinel)
+    audio_q: "queue.Queue[str | None]" = queue.Queue(maxsize=3)
     stop_ev = stop_speaking or threading.Event()
 
-    def tts_worker():
-        # Only auto-mute mic if it wasn't already muted (e.g. user pause)
+    def tts_generator():
+        """Thread 1: reads sentences, generates audio files, pushes to audio_q."""
+        while True:
+            sentence = tts_q.get()
+            if sentence is None:
+                audio_q.put(None)  # signal player to stop
+                break
+            if stop_ev.is_set() or (cancel_event and cancel_event.is_set()):
+                continue  # drain without generating
+            if _HAS_EDGE_TTS:
+                path = _generate_audio_edge(sentence)
+                if path:
+                    audio_q.put(path)
+                elif _HAS_SAY:
+                    # edge-tts failed for this sentence — fall back inline
+                    audio_q.put(("say", sentence))  # type: ignore[arg-type]
+            elif _HAS_SAY:
+                audio_q.put(("say", sentence))  # type: ignore[arg-type]
+
+    def tts_player():
+        """Thread 2: plays pre-generated audio files back-to-back (minimal gaps)."""
         _we_muted = False
         if mic_listener is not None and not mic_listener.muted.is_set():
             mic_listener.muted.set()
             _we_muted = True
         try:
             while True:
-                sentence = tts_q.get()
-                if sentence is None:
+                item = audio_q.get()
+                if item is None:
                     break
                 if stop_ev.is_set() or (cancel_event and cancel_event.is_set()):
-                    continue  # drain queue without speaking
-                _speak_sentence(sentence, stop_ev)
+                    # Clean up any generated files we're skipping
+                    if isinstance(item, str):
+                        try:
+                            os.unlink(item)
+                        except OSError:
+                            pass
+                    continue
+                if isinstance(item, tuple) and item[0] == "say":
+                    _speak_sentence_say(item[1], stop_ev)
+                elif isinstance(item, str):
+                    _play_audio_file(item, stop_ev)
                 try:
                     loop.call_soon_threadsafe(
                         aqueue.put_nowait, ("_tts", True))
                 except Exception:
                     pass
         finally:
-            # Only re-enable mic if WE muted it (not if user paused)
             if mic_listener is not None and _we_muted:
                 time.sleep(0.3)
                 mic_listener.muted.clear()
@@ -284,7 +321,8 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                 pass
 
     if _TTS_AVAILABLE:
-        threading.Thread(target=tts_worker, daemon=True).start()
+        threading.Thread(target=tts_generator, daemon=True).start()
+        threading.Thread(target=tts_player, daemon=True).start()
 
     final_response: dict | None = None
     brace_depth = 0
