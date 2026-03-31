@@ -1,182 +1,112 @@
 """
-Skill registry with hot-reload.
-Skills are plain Python callables registered by name.
-The brain can discover and invoke them at runtime.
+Skill registry for ARIA's brain.
+Provides register/call/list interface + built-in skills (python, shell, file ops).
+
+This module wraps brain.tools.ToolRegistry with a simpler "skills" API
+that the test suite and brain core both use.
 """
 from __future__ import annotations
-import importlib
-import importlib.util
+
+import io
 import logging
-import traceback
+import os
+import subprocess
+import sys
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
-from typing import Callable, Any
+
+from .tools import ToolRegistry
 
 log = logging.getLogger("x1.skills")
 
-SkillFn = Callable[..., str]  # skills return a string result
-
-_registry: dict[str, SkillFn] = {}
-_skill_modules: dict[str, Any] = {}   # name -> module, for hot-reload
+# ── Module-level registry ────────────────────────────────────────────────────
+_registry = ToolRegistry()
 
 
-def register(name: str, fn: SkillFn, *, override: bool = False) -> None:
-    if name in _registry and not override:
-        log.debug("Skill %r already registered, skipping", name)
-        return
-    _registry[name] = fn
-    log.info("Skill registered: %s", name)
+def register(name: str, fn, description: str | None = None, **kw) -> None:
+    """Register a skill (tool) by name."""
+    _registry.register(name, fn, description=description, **kw)
 
 
-def call(skill_name: str, **kwargs: Any) -> str:
-    if skill_name not in _registry:
-        return f"[SKILL ERROR] Unknown skill: {skill_name!r}. Available: {list_skills()}"
-    try:
-        return _registry[skill_name](**kwargs)
-    except Exception:
-        err = traceback.format_exc()
-        log.error("Skill %r raised:\n%s", skill_name, err)
-        return f"[SKILL ERROR] {skill_name} failed:\n{err}"
+def call(skill_name: str, **kwargs) -> str:
+    """Call a registered skill. Returns error string if not found."""
+    result = _registry.call(skill_name, **kwargs)
+    # Normalise error prefix for backward compat
+    if result.startswith("[TOOL ERROR]"):
+        result = result.replace("[TOOL ERROR]", "[SKILL ERROR]", 1)
+    return result
 
 
 def list_skills() -> list[str]:
-    return sorted(_registry.keys())
+    """Return names of all registered skills."""
+    return _registry.list_tools()
 
 
-def unregister(name: str) -> bool:
-    """Remove a skill from the live registry. Returns True if it existed."""
-    if name in _registry:
-        del _registry[name]
-        log.info("Skill unregistered: %s", name)
-        return True
-    return False
+# ── Built-in skills ──────────────────────────────────────────────────────────
 
-
-def load_skills_dir(skills_dir: Path) -> None:
-    """Dynamically load all .py files in skills_dir as skill modules."""
-    for path in sorted(skills_dir.glob("*.py")):
-        if path.name.startswith("_"):
-            continue
-        _load_skill_file(path)
-
-
-def load_skill_file(path: Path) -> None:
-    """Public alias for hot-reloading a single skill file (used by the server)."""
-    _load_skill_file(path)
-
-
-def _load_skill_file(path: Path) -> None:
-    name = path.stem
-    spec = importlib.util.spec_from_file_location(f"x1.skills.{name}", path)
-    if spec is None or spec.loader is None:
-        return
-    mod = importlib.util.module_from_spec(spec)
+def _builtin_python(code: str) -> str:
+    """Execute Python code and return stdout."""
+    buf = io.StringIO()
     try:
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _skill_modules[name] = mod
-
-        # Auto-register: functions named skill_<name>(...)
-        count = 0
-        for attr in dir(mod):
-            if attr.startswith("skill_"):
-                fn = getattr(mod, attr)
-                if callable(fn):
-                    register(attr[len("skill_"):], fn, override=True)
-                    count += 1
-
-        # Auto-register: explicit SKILLS = {"name": fn} dict
-        if hasattr(mod, "SKILLS") and isinstance(mod.SKILLS, dict):
-            for skill_name, fn in mod.SKILLS.items():
-                register(skill_name, fn, override=True)
-                count += 1
-
-        log.info("Loaded skill module: %s (%d skills)", name, count)
-    except Exception:
-        log.error("Failed to load skill %s:\n%s", name, traceback.format_exc())
+        with redirect_stdout(buf), redirect_stderr(buf):
+            exec(code, {"__builtins__": __builtins__})  # noqa: S102
+        output = buf.getvalue().strip()
+        return output if output else "(no output)"
+    except Exception as e:
+        return f"[PYTHON ERROR] {e}"
 
 
-def hot_reload(skills_dir: Path) -> list[str]:
-    """Re-execute changed skill modules. Returns list of reloaded names."""
-    reloaded = []
-    for name, mod in list(_skill_modules.items()):
-        path = Path(mod.__file__)  # type: ignore[arg-type]
-        if path.exists():
-            _load_skill_file(path)
-            reloaded.append(name)
-    return reloaded
-
-
-# ── Built-in skills ────────────────────────────────────────────────────────────
-
-def _skill_read_file(path: str) -> str:
-    p = Path(path).expanduser()
-    if not p.exists():
-        return f"[FILE ERROR] Not found: {path}"
-    return p.read_text(errors="replace")[:8000]
-
-
-def _skill_write_file(path: str, content: str) -> str:
-    p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
-    return f"Written {len(content)} chars to {path}"
-
-
-def _skill_list_dir(path: str = ".") -> str:
-    p = Path(path).expanduser()
-    if not p.is_dir():
-        return f"[DIR ERROR] Not a directory: {path}"
-    entries = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name))
-    return "\n".join(("[DIR]  " if e.is_dir() else "[FILE] ") + e.name for e in entries)
-
-
-def _skill_shell(command: str) -> str:
-    import subprocess
-    import shlex
+def _builtin_shell(command: str) -> str:
+    """Run a shell command and return combined output."""
     try:
         result = subprocess.run(
-            shlex.split(command), capture_output=True, text=True, timeout=15)
+            command, shell=True, capture_output=True, text=True, timeout=30,
+        )
         out = (result.stdout + result.stderr).strip()
-        return out[:4000] or "(no output)"
+        return out if out else "(no output)"
+    except subprocess.TimeoutExpired:
+        return "[SHELL ERROR] Command timed out (30s)"
     except Exception as e:
         return f"[SHELL ERROR] {e}"
 
 
-def _skill_screengrab(source: str = "webcam") -> str:
-    """Capture webcam or screen and return a plain-text description via vision AI."""
-    import os
-    import sys
-    from pathlib import Path
-    _proto = Path(__file__).parent.parent
-    if str(_proto) not in sys.path:
-        sys.path.insert(0, str(_proto))
+def _builtin_list_dir(path: str = ".") -> str:
+    """List files in a directory."""
     try:
-        from vision.camera import capture, describe_frame  # type: ignore[import]
-        frame = capture(source=source)
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return f"[screengrab] frame captured ({frame.width}x{frame.height}) — no vision API key to describe it"
-        description = describe_frame(frame, api_key)
-        return f"[{source}] {description}"
+        entries = sorted(os.listdir(path))
+        return "\n".join(entries) if entries else "(empty directory)"
     except Exception as e:
-        return f"[SCREENGRAB ERROR] {e}"
+        return f"[DIR ERROR] {e}"
 
 
-def _skill_python(code: str) -> str:
-    import io
-    import contextlib
-    buf = io.StringIO()
+def _builtin_read_file(path: str) -> str:
+    """Read a file and return its content."""
     try:
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            exec(code, {"__name__": "__x1_exec__"})  # noqa: S102
-        return buf.getvalue().strip() or "(executed, no output)"
+        return Path(path).read_text()
     except Exception as e:
-        return f"[PYTHON ERROR] {e}\n{buf.getvalue()}"
+        return f"[FILE ERROR] {e}"
+
+
+def _builtin_write_file(path: str, content: str) -> str:
+    """Write content to a file."""
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(content)
+        return f"Wrote {len(content)} chars to {path}"
+    except Exception as e:
+        return f"[FILE ERROR] {e}"
 
 
 def register_builtins() -> None:
-    register("read_file",  _skill_read_file)
-    register("write_file", _skill_write_file)
-    register("list_dir",   _skill_list_dir)
-    register("shell",      _skill_shell)
-    register("screengrab", _skill_screengrab)
-    register("python",     _skill_python)
+    """Register all built-in skills (python, shell, file ops)."""
+    builtins = {
+        "python": _builtin_python,
+        "shell": _builtin_shell,
+        "list_dir": _builtin_list_dir,
+        "read_file": _builtin_read_file,
+        "write_file": _builtin_write_file,
+    }
+    for name, fn in builtins.items():
+        if name not in _registry:
+            _registry.register(name, fn)
+

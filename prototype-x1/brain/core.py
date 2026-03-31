@@ -6,9 +6,10 @@ Bare conversation loop:
   2. Build context (system + memories + rolling chat)
   3. Call LLM (Ollama -> cloud fallback)
   4. Persist turn to memory
-  5. Detect & execute tool calls (web_fetch)
+  5. Detect & execute tool/skill calls (JSON dispatch)
 """
 from __future__ import annotations
+import json
 import logging
 import re
 import time
@@ -17,6 +18,8 @@ from dataclasses import dataclass, field
 from .config import BrainConfig
 from .llm import call_llm, stream_llm, Message
 from .memory import EpisodicMemory
+from .agents import AgentCoordinator
+from .skills import _registry as skill_registry, register_builtins
 
 log = logging.getLogger("x1.core")
 
@@ -41,8 +44,14 @@ SYSTEM_PROMPT = (
     "/no_think"
 )
 
-# ── Web fetch regex ───────────────────────────────────────────────────────────
+# ── Web fetch regex (legacy, still supported) ────────────────────────────────
 _FETCH_RE = re.compile(r"\[FETCH:\s*(https?://\S+)\]", re.IGNORECASE)
+
+# ── Skill call regex — matches ```skill ... ``` or ```tool_call ... ``` ──────
+_SKILL_BLOCK_RE = re.compile(
+    r"```(?:skill|tool_call)\s*\n(\{.*?\})\s*\n```",
+    re.DOTALL,
+)
 
 
 @dataclass
@@ -58,8 +67,32 @@ class Brain:
     def __init__(self, cfg: BrainConfig | None = None) -> None:
         self.cfg = cfg or BrainConfig()
         self.memory = EpisodicMemory(self.cfg.memory)
+        self.agents = AgentCoordinator(self.cfg.llm)
+        # Ensure built-in skills are registered
+        register_builtins()
+        # Register delegate_task skill so LLM can call sub-agents
+        self._register_delegate_skill()
         log.info("Brain ready — name=%s model=%s",
                  self.cfg.name, self.cfg.llm.ollama_model)
+
+    def _register_delegate_skill(self) -> None:
+        """Register the delegate tool that routes tasks to sub-agents."""
+        def _delegate(agent: str, task: str, context: str = "") -> str:
+            result = self.agents.run(agent, task, context=context)
+            if not result.success:
+                return f"[DELEGATE ERROR] {result.error}"
+            return result.output
+
+        if "delegate" not in skill_registry:
+            skill_registry.register(
+                "delegate", _delegate,
+                description="Delegate a task to a specialist sub-agent",
+                parameters={
+                    "agent": {"type": "string", "description": "Agent name: summarizer, coder, researcher, critic", "required": True},
+                    "task": {"type": "string", "description": "The task description to delegate", "required": True},
+                    "context": {"type": "string", "description": "Optional context to provide", "required": False},
+                },
+            )
 
     def _build_messages(self, user_input: str, recalled: list) -> list[Message]:
         """Build a minimal message list: system + recalled memory + chat history + user."""
@@ -94,6 +127,29 @@ class Brain:
             from web_fetch import skill_web_fetch
         return skill_web_fetch(url)
 
+    def _extract_skill_calls(self, reply: str) -> list[dict]:
+        """Extract ```skill or ```tool_call JSON blocks from LLM reply."""
+        calls = []
+        for m in _SKILL_BLOCK_RE.finditer(reply):
+            try:
+                parsed = json.loads(m.group(1))
+                if "name" in parsed:
+                    calls.append(parsed)
+            except json.JSONDecodeError:
+                log.warning("Malformed skill block: %s", m.group(1)[:80])
+        return calls
+
+    def _execute_skill_calls(self, calls: list[dict]) -> list[str]:
+        """Execute parsed skill calls through the registry."""
+        results = []
+        for call_def in calls:
+            name = call_def["name"]
+            args = call_def.get("args", {})
+            log.info("Executing skill: %s(%s)", name, args)
+            result = skill_registry.call(name, **args)
+            results.append(result)
+        return results
+
     def process(self, user_input: str, **kwargs) -> BrainResponse:
         """Simple synchronous conversation turn."""
         t0 = time.time()
@@ -101,12 +157,28 @@ class Brain:
         messages = self._build_messages(user_input, recalled)
         reply, provider = call_llm(self.cfg.llm, messages)
 
-        # Check for tool call
-        page_content = self._try_web_fetch(reply)
-        if page_content:
+        skill_calls: list[dict] = []
+        skill_results: list[str] = []
+
+        # Check for structured skill calls (```skill blocks)
+        skill_calls = self._extract_skill_calls(reply)
+        if skill_calls:
+            skill_results = self._execute_skill_calls(skill_calls)
+            # Feed results back to LLM for a follow-up response
+            results_text = "\n".join(
+                f"[{c['name']}] → {r}" for c, r in zip(skill_calls, skill_results)
+            )
             messages.append({"role": "assistant", "content": reply})
-            messages.append({"role": "user", "content": f"Here is the page content:\n\n{page_content}\n\nSummarize this for me."})
+            messages.append({"role": "user", "content": f"Tool results:\n{results_text}\n\nRespond based on these results."})
             reply, provider = call_llm(self.cfg.llm, messages)
+
+        # Legacy: Check for [FETCH: url] pattern
+        if not skill_calls:
+            page_content = self._try_web_fetch(reply)
+            if page_content:
+                messages.append({"role": "assistant", "content": reply})
+                messages.append({"role": "user", "content": f"Here is the page content:\n\n{page_content}\n\nSummarize this for me."})
+                reply, provider = call_llm(self.cfg.llm, messages)
 
         self.memory.add("user", user_input)
         if reply.strip():
@@ -114,7 +186,10 @@ class Brain:
 
         latency = int((time.time() - t0) * 1000)
         log.info("Turn complete in %dms via %s", latency, provider)
-        return BrainResponse(text=reply, provider=provider, latency_ms=latency)
+        return BrainResponse(
+            text=reply, provider=provider, latency_ms=latency,
+            skill_calls=skill_calls, skill_results=skill_results,
+        )
 
     def stream(self, user_input: str, speaker: str = "unknown",
                stop_event: "threading.Event | None" = None, **kwargs):
@@ -186,4 +261,4 @@ class Brain:
 
     @property
     def skill_list(self) -> list[str]:
-        return []
+        return skill_registry.list_tools()
