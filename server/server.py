@@ -438,7 +438,7 @@ async def websocket_endpoint(ws: WebSocket):
     # Uses debouncing + cancellation for fluid conversation
     mic_task = None
     _cancel_brain = threading.Event()  # signals brain to stop mid-stream
-    _DEBOUNCE_SEC = 0.6  # wait for Whisper fragments to settle
+    _DEBOUNCE_SEC = 0.3  # wait for Whisper fragments to settle (was 0.6 — too slow)
 
     if mic is not None:
         async def mic_relay():

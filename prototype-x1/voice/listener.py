@@ -15,10 +15,10 @@ SAMPLE_RATE = 16000
 CHUNK_MS = 200          # ms per audio chunk
 CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_MS / 1000)
 SILENCE_THRESHOLD = 0.03   # RMS below this = silence (raised from 0.025 to reject ambient noise)
-SILENCE_CHUNKS = 8         # ~1.6s of silence = end of utterance (faster cutoff)
-MIN_SPEECH_CHUNKS = 6      # ignore clips shorter than ~1.2s (raised from 4 to reject noise bursts)
+SILENCE_CHUNKS = 5         # ~1.0s of silence = end of utterance (was 8/1.6s — too slow)
+MIN_SPEECH_CHUNKS = 4      # ignore clips shorter than ~0.8s (was 6/1.2s — missed short phrases)
 MAX_BUFFER_CHUNKS = 150    # cap at ~30s — allows longer speech before forced flush
-MIN_TRANSCRIBE_GAP = 1.5   # minimum seconds between transcriptions to prevent rapid-fire
+MIN_TRANSCRIBE_GAP = 0.8   # minimum seconds between transcriptions (was 1.5s — too conservative)
 
 # Whisper-tiny hallucinates these phrases on ambient noise / silence
 _HALLUCINATION_PHRASES = {
