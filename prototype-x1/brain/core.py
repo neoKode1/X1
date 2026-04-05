@@ -40,6 +40,10 @@ SYSTEM_PROMPT = (
     "Personality: Warm, direct, confident. Like Jarvis — sharp wit, genuine care, no filler. "
     "Keep answers to 1-3 sentences unless depth is requested. "
     "Have opinions. Be resourceful. Never be sycophantic.\n\n"
+    "MEMORY: You have long-term memory. You remember past conversations and learn facts "
+    "about NeoKode over time. If 'Known facts' or 'Relevant memories' are injected above "
+    "your context, reference them naturally — don't pretend you don't know things you've "
+    "already learned. Build on previous conversations. Grow.\n\n"
     "TOOL: If asked to look up, fetch, or read a URL, respond with exactly:\n"
     "[FETCH: <url>]\nYou will receive the page content in a follow-up."
 )
@@ -75,8 +79,9 @@ class Brain:
         self._last_frame_b64: str | None = None  # latest webcam JPEG (base64)
         self._last_frame_ts: float = 0.0
         primary = self.cfg.llm.anthropic_model if self.cfg.llm.anthropic_api_key else self.cfg.llm.ollama_model
-        log.info("Brain ready — name=%s primary=%s fallback=%s",
-                 self.cfg.name, primary, self.cfg.llm.ollama_model)
+        log.info("Brain ready — name=%s primary=%s fallback=%s knowledge=%d",
+                 self.cfg.name, primary, self.cfg.llm.ollama_model,
+                 self.memory.knowledge_count)
 
     def update_vision(self, frame_b64: str | None = None, **kwargs) -> None:
         """Store the latest webcam frame for the next conversation turn."""
@@ -111,12 +116,22 @@ class Brain:
         """
         messages: list[Message] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # One recalled memory at most
+        # Inject recalled long-term memories (up to 5)
         if recalled:
-            mem_block = "\n".join(
-                f"[{e.role}] {e.text[:120]}" for e in recalled[:1]
-            )
+            mem_lines = []
+            for e in recalled[:5]:
+                # Full text up to 500 chars — enough for real context
+                snippet = e.text[:500]
+                mem_lines.append(f"[{e.role}] {snippet}")
+            mem_block = "Relevant memories from past conversations:\n" + "\n".join(mem_lines)
             messages.append({"role": "system", "content": mem_block})
+
+        # Inject learned knowledge (facts, preferences)
+        knowledge = self.memory.recall_knowledge(user_input, top_k=3)
+        if knowledge:
+            k_lines = [f"• {e.text}" for e in knowledge]
+            k_block = "Known facts about NeoKode:\n" + "\n".join(k_lines)
+            messages.append({"role": "system", "content": k_block})
 
         messages.extend(self.memory.as_messages(self.cfg.llm.context_window))
 
@@ -267,11 +282,14 @@ class Brain:
                 provider = prov
                 yield ("token", token)
 
-        # Background memory write
+        # Background memory write + periodic session summary
         def _bg_memorize():
             self.memory.add("user", user_input)
             if full_text.strip():
                 self.memory.add("assistant", full_text)
+            # Auto-summarize every 20 turns to capture learning
+            if self.memory._turn_count > 0 and self.memory._turn_count % 20 == 0:
+                self.memory.summarize_session()
 
         _threading.Thread(target=_bg_memorize, daemon=True).start()
 

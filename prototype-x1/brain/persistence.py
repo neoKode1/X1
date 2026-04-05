@@ -107,6 +107,17 @@ class ConversationStore:
         finally:
             db.close()
 
+    def update_summary(self, conversation_id: str, summary: str) -> None:
+        """Store a session summary on the conversation record."""
+        db = self._db()
+        try:
+            conv = db.query(Conversation).get(conversation_id)
+            if conv:
+                conv.summary = summary
+                db.commit()
+        finally:
+            db.close()
+
     # ── Turn management ───────────────────────────────────────────────────────
 
     def add_turn(self, conversation_id: str, role: str, content: str,
