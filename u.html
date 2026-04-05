@@ -367,18 +367,23 @@
   }
   startWebcam();
 
-  // Hidden canvas for capturing low-res frames to send to Qwen3-VL
+  // Canvas for capturing frames to send to Claude vision
   const frameCanvas = document.createElement('canvas');
-  frameCanvas.width = 160; frameCanvas.height = 120;
+  frameCanvas.width = 640; frameCanvas.height = 480;
   const frameCtx = frameCanvas.getContext('2d');
   let lastFrameSend = 0;
-  const FRAME_INTERVAL_MS = 5000; // send a frame every 5s (vision is expensive)
+  const FRAME_INTERVAL_MS = 5000; // send a frame every 5s
 
   function captureFrame() {
     if (!wcHasFeed || !wcVideo.videoWidth) return null;
-    frameCtx.drawImage(wcVideo, 0, 0, 160, 120);
-    // Return base64 JPEG without the data:image/jpeg;base64, prefix
-    const dataUrl = frameCanvas.toDataURL('image/jpeg', 0.4);
+    // Use actual video dimensions, capped at 640x480
+    const w = Math.min(wcVideo.videoWidth, 640);
+    const h = Math.min(wcVideo.videoHeight, 480);
+    frameCanvas.width = w;
+    frameCanvas.height = h;
+    frameCtx.drawImage(wcVideo, 0, 0, w, h);
+    // JPEG at 0.75 quality — readable but not huge
+    const dataUrl = frameCanvas.toDataURL('image/jpeg', 0.75);
     return dataUrl.split(',')[1]; // strip prefix, return raw base64
   }
 
