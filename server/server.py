@@ -690,6 +690,52 @@ def health():
     return {"ok": True, "brain_available": BRAIN_AVAILABLE, "uptime_s": int(time.time() - _start_time)}
 
 
+# ── Conversation history ─────────────────────────────────────────────────────
+@app.get("/conversations")
+def list_conversations():
+    """List all conversations with metadata."""
+    import sqlite3
+    db_path = BRAIN_PATH / "memory" / "conversations.db"
+    if not db_path.exists():
+        return {"conversations": []}
+    db = sqlite3.connect(str(db_path))
+    cursor = db.cursor()
+    cursor.execute("""
+        SELECT c.id, c.started_at, c.updated_at, c.summary,
+               COUNT(t.id) as turn_count
+        FROM conversations c
+        LEFT JOIN turns t ON t.conversation_id = c.id
+        GROUP BY c.id
+        ORDER BY c.updated_at DESC
+    """)
+    cols = [d[0] for d in cursor.description]
+    convos = [dict(zip(cols, row)) for row in cursor.fetchall()]
+    db.close()
+    return {"conversations": convos}
+
+
+@app.get("/conversations/{conv_id}")
+def get_conversation(conv_id: str):
+    """Get all turns for a conversation — full exportable history."""
+    import sqlite3
+    db_path = BRAIN_PATH / "memory" / "conversations.db"
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="No conversation database")
+    db = sqlite3.connect(str(db_path))
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT role, content, timestamp FROM turns WHERE conversation_id = ? ORDER BY seq",
+        (conv_id,)
+    )
+    cols = [d[0] for d in cursor.description]
+    turns = [dict(zip(cols, row)) for row in cursor.fetchall()]
+    db.close()
+    if not turns:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"conversation_id": conv_id, "turns": turns}
+
+
+
 # ── Webcam snapshot endpoint ──────────────────────────────────────────────────
 @app.get("/webcam/snapshot")
 def webcam_snapshot():
