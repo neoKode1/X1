@@ -50,6 +50,14 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("x1.server")
 
+# Prevent duplicate log lines — x1.* loggers should not propagate to root AND uvicorn
+for _ln in ("x1", "x1.server", "x1.core", "x1.llm", "x1.listener", "x1.web_fetch"):
+    logging.getLogger(_ln).propagate = False
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logging.getLogger(_ln).addHandler(_h)
+    logging.getLogger(_ln).setLevel(logging.INFO)
+
 app = FastAPI(title="X1 Brain Bridge", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -285,9 +293,11 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
 
     def tts_player():
         """Thread 2: plays pre-generated audio files back-to-back (minimal gaps)."""
+        # Mute mic BEFORE any audio plays to prevent echo
         _we_muted = False
         if mic_listener is not None and not mic_listener.muted.is_set():
             mic_listener.muted.set()
+            mic_listener.flush()  # drain any buffered audio
             _we_muted = True
         try:
             while True:
@@ -295,7 +305,6 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                 if item is None:
                     break
                 if stop_ev.is_set() or (cancel_event and cancel_event.is_set()):
-                    # Clean up any generated files we're skipping
                     if isinstance(item, str):
                         try:
                             os.unlink(item)
@@ -313,7 +322,8 @@ async def _stream_brain(ws: WebSocket, brain: Any, user_text: str,
                     pass
         finally:
             if mic_listener is not None and _we_muted:
-                time.sleep(0.3)
+                time.sleep(0.5)  # wait for speaker echo to die (was 0.3s)
+                mic_listener.flush()  # drain any audio captured during playback
                 mic_listener.muted.clear()
             try:
                 loop.call_soon_threadsafe(
