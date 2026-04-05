@@ -530,7 +530,7 @@ async def websocket_endpoint(ws: WebSocket):
                     if brain:
                         log.info("Debounced input → brain: %r", text)
                         await _kill_current_response()
-                        _brain_task = asyncio.create_task(_run_brain(text, "Neokode"))
+                        _state["brain_task"] = asyncio.create_task(_run_brain(text, "Neokode"))
                     else:
                         log.warning("No brain available — mic text dropped: %r", text)
                 except Exception as exc:
@@ -559,27 +559,27 @@ async def websocket_endpoint(ws: WebSocket):
     if mic is not None:
         vol_task = asyncio.create_task(volume_streamer())
 
-    _brain_task: asyncio.Task | None = None
+    # Shared mutable container so mic_relay and WS handler see the same task
+    _state = {"brain_task": None}
 
     async def _kill_current_response():
         """Cancel any in-progress brain stream + TTS."""
-        nonlocal _brain_task
         _cancel_brain.set()
         _kill_active_say()
         stop_speaking.set()
-        if _brain_task and not _brain_task.done():
-            _brain_task.cancel()
+        task = _state["brain_task"]
+        if task and not task.done():
+            task.cancel()
             try:
-                await _brain_task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
-        _brain_task = None
+        _state["brain_task"] = None
         await asyncio.sleep(0.05)
         _cancel_brain.clear()
         stop_speaking.clear()
 
     async def _run_brain(user_text: str, speaker: str = "Neokode"):
-        nonlocal _brain_task
         if brain:
             await _stream_brain(ws, brain, user_text, speaker=speaker,
                                 stop_speaking=stop_speaking,
@@ -610,7 +610,7 @@ async def websocket_endpoint(ws: WebSocket):
                 await _kill_current_response()
 
                 # Start new brain stream as background task (non-blocking)
-                _brain_task = asyncio.create_task(_run_brain(user_text, speaker))
+                _state["brain_task"] = asyncio.create_task(_run_brain(user_text, speaker))
 
             elif kind == "pause":
                 # Full stop: TTS + brain + mic listening — hard interrupt
