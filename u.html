@@ -382,7 +382,23 @@
     return dataUrl.split(',')[1]; // strip prefix, return raw base64
   }
 
-  // Face detection loop — runs on every animation frame
+  // ── Vision frame sender (independent of MediaPipe) ──────────
+  // Sends webcam frames to the server every FRAME_INTERVAL_MS
+  // regardless of whether MediaPipe face detection is working
+  function startFrameSender() {
+    setInterval(() => {
+      if (!wcHasFeed || !ws || ws.readyState !== 1) return;
+      const frame = captureFrame();
+      if (frame) {
+        ws.send(JSON.stringify({ kind: 'vision', payload: { frame } }));
+        lastFrameSend = performance.now();
+        console.log('[Vision] Frame sent to server (' + frame.length + ' chars)');
+      }
+    }, FRAME_INTERVAL_MS);
+  }
+  startFrameSender();
+
+  // Face detection loop — runs on every animation frame (optional overlay)
   let lastDetectMs = 0;
   function detectLoop() {
     if (!wcHasFeed) return;
@@ -428,16 +444,10 @@
             else if (blink > 0.5) mood = 'blink';
             wcStatus.textContent = '● face · ' + mood;
 
-            // Throttle expressions: send at most every 500ms
+            // Send expressions metadata (no frame — frame sender handles that)
             if (now - (window._lastExprSend || 0) > 500) {
               window._lastExprSend = now;
-              // Capture a frame every FRAME_INTERVAL_MS for native vision
-              let frame = null;
-              if (now - lastFrameSend > FRAME_INTERVAL_MS) {
-                frame = captureFrame();
-                if (frame) lastFrameSend = now;
-              }
-              ws.send(JSON.stringify({ kind: 'vision', payload: { face: true, expressions: expr, frame } }));
+              ws.send(JSON.stringify({ kind: 'vision', payload: { face: true, expressions: expr } }));
             }
           } else {
             wcStatus.textContent = '● face detected';

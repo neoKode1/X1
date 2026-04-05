@@ -643,7 +643,7 @@ async def websocket_endpoint(ws: WebSocket):
                 brain = get_brain()
                 if brain is not None and frame_b64:
                     brain.update_vision(frame_b64=frame_b64)
-                    log.debug("Vision frame stored (%d chars)", len(frame_b64))
+                    log.info("Vision frame received (%d chars) — ARIA can see", len(frame_b64))
 
     except WebSocketDisconnect:
         log.info("Client disconnected")
