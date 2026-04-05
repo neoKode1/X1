@@ -50,13 +50,16 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("x1.server")
 
-# Prevent duplicate log lines — x1.* loggers should not propagate to root AND uvicorn
-for _ln in ("x1", "x1.server", "x1.core", "x1.llm", "x1.listener", "x1.web_fetch"):
-    logging.getLogger(_ln).propagate = False
-    _h = logging.StreamHandler()
-    _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logging.getLogger(_ln).addHandler(_h)
-    logging.getLogger(_ln).setLevel(logging.INFO)
+# Prevent duplicate log lines — single handler on x1 root, children inherit
+_x1_root = logging.getLogger("x1")
+_x1_root.handlers.clear()
+_x1_root.propagate = False
+_x1_root.setLevel(logging.INFO)
+_h = logging.StreamHandler()
+_h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s"))
+_x1_root.addHandler(_h)
+# Also suppress faster_whisper noise
+logging.getLogger("faster_whisper").setLevel(logging.WARNING)
 
 app = FastAPI(title="X1 Brain Bridge", version="0.1.0")
 app.add_middleware(

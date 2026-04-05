@@ -210,8 +210,8 @@ class MicListener:
                         audio = np.concatenate(buffer)
                         rms_total = float(np.sqrt(np.mean(audio ** 2)))
                         if rms_total > SILENCE_THRESHOLD:
-                            log.info("Processing audio with duration %s (capped)",
-                                     _fmt_dur(len(audio) / SAMPLE_RATE))
+                            log.debug("Processing audio with duration %s (capped)",
+                                      _fmt_dur(len(audio) / SAMPLE_RATE))
                             text = self._transcribe(audio)
                             if text and not _is_hallucination(text):
                                 log.info("Mic: %s", text)
@@ -237,8 +237,8 @@ class MicListener:
                             audio = np.concatenate(buffer)
                             rms_total = float(np.sqrt(np.mean(audio ** 2)))
                             if rms_total > SILENCE_THRESHOLD:
-                                log.info("Processing audio with duration %s",
-                                         _fmt_dur(len(audio) / SAMPLE_RATE))
+                                log.debug("Processing audio with duration %s",
+                                          _fmt_dur(len(audio) / SAMPLE_RATE))
                                 text = self._transcribe(audio)
                                 if text and not _is_hallucination(text):
                                     log.info("Mic: %s", text)
