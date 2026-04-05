@@ -68,8 +68,9 @@ def get_brain():
     if _brain is None and BRAIN_AVAILABLE:
         cfg = BrainConfig()
         _brain = Brain(cfg)
-        log.info("Brain initialised — ollama=%s fallback=%s",
-                 cfg.llm.ollama_model, cfg.llm.cloud_fallback)
+        log.info("Brain initialised — primary=%s (%s) fallback=%s (%s)",
+                 cfg.llm.primary, cfg.llm.anthropic_model if cfg.llm.anthropic_api_key else "no key",
+                 cfg.llm.cloud_fallback, cfg.llm.ollama_model)
     return _brain
 
 # ── TTS engine ────────────────────────────────────────────────────────────────
@@ -216,7 +217,7 @@ def status_msg(state: str, extra: dict | None = None) -> str:
     if not BRAIN_AVAILABLE:
         model_name = "mock"
     elif brain:
-        model_name = f"{brain.cfg.llm.ollama_model} / {brain.cfg.llm.cloud_fallback}"
+        model_name = f"{brain.cfg.llm.anthropic_model} (fallback: {brain.cfg.llm.ollama_model})"
     else:
         model_name = "—"
     payload = {

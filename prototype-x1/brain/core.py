@@ -72,8 +72,9 @@ class Brain:
         register_builtins()
         # Register delegate_task skill so LLM can call sub-agents
         self._register_delegate_skill()
-        log.info("Brain ready — name=%s model=%s",
-                 self.cfg.name, self.cfg.llm.ollama_model)
+        primary = self.cfg.llm.anthropic_model if self.cfg.llm.anthropic_api_key else self.cfg.llm.ollama_model
+        log.info("Brain ready — name=%s primary=%s fallback=%s",
+                 self.cfg.name, primary, self.cfg.llm.ollama_model)
 
     def _register_delegate_skill(self) -> None:
         """Register the delegate tool that routes tasks to sub-agents."""
