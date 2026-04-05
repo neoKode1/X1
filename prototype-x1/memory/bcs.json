@@ -3,7 +3,12 @@
   "structural_integrity": 0.0,
   "material_availability": 0.0,
   "actuation_coverage": 0.0,
-  "skill_fails": {},
+  "skill_fails": {
+    "move": 1,
+    "manual": 1,
+    "pause_conversation": 1,
+    "pause_conversation_wrapper": 1
+  },
   "tombstones": {},
-  "last_updated": "2026-03-24T15:00:33.107863+00:00"
+  "last_updated": "2026-03-24T17:03:34.032203+00:00"
 }

@@ -27,39 +27,97 @@ from pathlib import Path
 SPEECH_WPM = 150
 
 # ── Local TTS ─────────────────────────────────────────────────────────────────
-# macOS: use the built-in `say` command via subprocess.
-#   • Works from ANY thread — no main-thread restriction like pyttsx3/NSSpeechSynthesizer
-#   • Same voice, same engine under the hood, zero setup
-# Raspberry Pi / Linux: fall back to pyttsx3 (espeak driver, main-thread safe there)
+# Priority: edge-tts (neural) → macOS say → pyttsx3 → silent
+import asyncio as _asyncio
+import os as _os
 import shutil as _shutil
 import subprocess as _subprocess
+import tempfile as _tempfile
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+_EDGE_TTS_VOICE = _os.environ.get("TTS_VOICE", "en-US-AvaMultilingualNeural")
+
+# Check TTS backends
+try:
+    import edge_tts as _edge_tts
+    _HAS_EDGE_TTS = True
+except ImportError:
+    _HAS_EDGE_TTS = False
+
+_HAS_SAY = _shutil.which("say") is not None
+_HAS_AFPLAY = _shutil.which("afplay") is not None
 
 # ── Interrupt state ───────────────────────────────────────────────────────────
-# Ctrl+C while ARIA speaks: KeyboardInterrupt is caught in the main thread,
-# which sets this event and terminates the active `say` subprocess.
-# No raw-mode stdin hacks — those corrupt the terminal.
 _stop_speaking: threading.Event = threading.Event()
 _active_say_proc: "_subprocess.Popen[bytes] | None" = None
 _proc_lock: threading.Lock = threading.Lock()
 
 
 def _kill_active_say() -> None:
-    """Terminate the currently running `say` subprocess, if any."""
+    """Terminate the currently running audio subprocess, if any."""
     global _active_say_proc
     with _proc_lock:
         if _active_say_proc and _active_say_proc.poll() is None:
             _active_say_proc.terminate()
 
 
-if _shutil.which("say"):
-    # macOS — subprocess `say`, works from any thread
-    _SAY_VOICE = "Flo"
-    _SAY_RATE = "210"  # WPM — 150 was sluggish, 210 feels natural-fast
+def _play_audio(path: str, stop: "threading.Event | None" = None) -> None:
+    """Play an audio file via afplay/aplay. Interruptible."""
+    global _active_say_proc
+    player = "afplay" if _HAS_AFPLAY else "aplay"
+    proc = _subprocess.Popen([player, path])
+    with _proc_lock:
+        _active_say_proc = proc
+    proc.wait()
+    with _proc_lock:
+        if _active_say_proc is proc:
+            _active_say_proc = None
 
+
+def _speak_edge(sentence: str, stop: "threading.Event | None" = None) -> None:
+    """Speak via edge-tts neural voice."""
+    global _active_say_proc
+    sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
+    if not sentence or (stop and stop.is_set()):
+        return
+    tmp = _tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        comm = _edge_tts.Communicate(sentence, _EDGE_TTS_VOICE)
+        _asyncio.run(comm.save(tmp_path))
+        if stop and stop.is_set():
+            return
+        _play_audio(tmp_path, stop)
+    except Exception:
+        # Fallback to say if edge-tts fails
+        if _HAS_SAY:
+            _speak_say(sentence, stop)
+    finally:
+        try:
+            _os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _speak_say(sentence: str, stop: "threading.Event | None" = None) -> None:
+    """Fallback: speak via macOS say."""
+    global _active_say_proc
+    sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
+    if not sentence or (stop and stop.is_set()):
+        return
+    proc = _subprocess.Popen(["say", "-v", "Flo", "-r", "210", sentence])
+    with _proc_lock:
+        _active_say_proc = proc
+    proc.wait()
+    with _proc_lock:
+        if _active_say_proc is proc:
+            _active_say_proc = None
+
+
+# Choose the best TTS backend
+if _HAS_EDGE_TTS:
     def speak(text: str, stop: "threading.Event | None" = None) -> None:
-        global _active_say_proc
         clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
         if not clean:
             return
@@ -69,64 +127,43 @@ if _shutil.which("say"):
                 continue
             if stop and stop.is_set():
                 return
-            proc = _subprocess.Popen(["say", "-v", _SAY_VOICE, "-r", _SAY_RATE, sentence])
-            with _proc_lock:
-                _active_say_proc = proc
-            proc.wait()
-            with _proc_lock:
-                _active_say_proc = None
+            _speak_edge(sentence, stop)
             if stop and stop.is_set():
                 return
-            time.sleep(0.08)  # tighter gap between sentences
+            time.sleep(0.08)
 
     def speak_sentence(sentence: str, stop: "threading.Event | None" = None) -> None:
-        """Speak a single sentence immediately. Used for streaming TTS."""
-        global _active_say_proc
-        sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
-        if not sentence or (stop and stop.is_set()):
+        _speak_edge(sentence, stop)
+
+    _TTS_AVAILABLE = True
+
+elif _HAS_SAY:
+    def speak(text: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
+        clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
+        if not clean:
             return
-        proc = _subprocess.Popen(["say", "-v", _SAY_VOICE, "-r", _SAY_RATE, sentence])
-        with _proc_lock:
-            _active_say_proc = proc
-        proc.wait()
-        with _proc_lock:
-            _active_say_proc = None
+        for sentence in _SENTENCE_RE.split(clean):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if stop and stop.is_set():
+                return
+            _speak_say(sentence, stop)
+            if stop and stop.is_set():
+                return
+            time.sleep(0.08)
+
+    def speak_sentence(sentence: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
+        _speak_say(sentence, stop)
 
     _TTS_AVAILABLE = True
 
 else:
-    # Pi / Linux fallback
-    try:
-        import pyttsx3 as _pyttsx3
-        _TTS_ENGINE = _pyttsx3.init()
-        _TTS_ENGINE.setProperty("rate", 150)
-        _TTS_ENGINE.setProperty("volume", 0.9)
-
-        def speak(text: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
-            clean = re.sub(r"[`*_#>\[\]]+", "", text).strip()
-            if not clean:
-                return
-            for sentence in _SENTENCE_RE.split(clean):
-                sentence = sentence.strip()
-                if sentence and not (stop and stop.is_set()):
-                    _TTS_ENGINE.say(sentence)
-                    _TTS_ENGINE.runAndWait()
-                    time.sleep(0.15)
-
-        def speak_sentence(sentence: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
-            sentence = re.sub(r"[`*_#>\[\]]+", "", sentence).strip()
-            if sentence and not (stop and stop.is_set()):
-                _TTS_ENGINE.say(sentence)
-                _TTS_ENGINE.runAndWait()
-
-        _TTS_AVAILABLE = True
-
-    except Exception:
-        _TTS_AVAILABLE = False
-        def speak(text: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
-            pass
-        def speak_sentence(sentence: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
-            pass
+    _TTS_AVAILABLE = False
+    def speak(text: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
+        pass
+    def speak_sentence(sentence: str, stop: "threading.Event | None" = None) -> None:  # type: ignore[misc]
+        pass
 
 
 import random as _random
