@@ -505,12 +505,21 @@ async def websocket_endpoint(ws: WebSocket):
                     log.debug("Paused — dropping mic text: %r", text)
                     continue
 
+                # ── Drop echo: ignore mic input while TTS is playing ──
+                if mic is not None and mic.muted.is_set():
+                    log.debug("Mic muted (TTS playing) — dropping echo: %r", text[:60])
+                    continue
+
+                # ── Drop very short fragments (likely echo remnants) ──
+                if len(text.split()) < 2:
+                    log.debug("Dropping single-word fragment: %r", text)
+                    continue
+
                 # ── Cancel any in-progress response ───────────────────
                 if processing:
                     log.info("New speech arrived — cancelling current response")
                     _cancel_brain.set()
                     _kill_active_say()
-                    # Give brain thread a moment to see the cancel
                     await asyncio.sleep(0.05)
 
                 try:
