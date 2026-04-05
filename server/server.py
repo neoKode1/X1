@@ -505,28 +505,28 @@ async def websocket_endpoint(ws: WebSocket):
                     log.debug("Paused — dropping mic text: %r", text)
                     continue
 
-                # ── Drop echo: ignore mic input while TTS is playing ──
-                if mic is not None and mic.muted.is_set():
-                    log.debug("Mic muted (TTS playing) — dropping echo: %r", text[:60])
-                    continue
+                # ── Echo vs interruption ────────────────────────────
+                is_tts_playing = mic is not None and mic.muted.is_set()
+                word_count = len(text.split())
 
-                # ── Drop very short fragments (likely echo remnants) ──
-                if len(text.split()) < 2:
+                if is_tts_playing:
+                    # While ARIA is speaking, short fragments are echo — drop them
+                    if word_count < 4:
+                        log.debug("Echo during TTS — dropping: %r", text[:60])
+                        continue
+                    # Longer speech = real interruption — kill TTS and respond
+                    log.info("Voice interruption detected: %r", text[:80])
+                    await _kill_current_response()
+                elif word_count < 2:
+                    # Not during TTS — still drop single-word noise
                     log.debug("Dropping single-word fragment: %r", text)
                     continue
-
-                # ── Cancel any in-progress response ───────────────────
-                if processing:
-                    log.info("New speech arrived — cancelling current response")
-                    _cancel_brain.set()
-                    _kill_active_say()
-                    await asyncio.sleep(0.05)
 
                 try:
                     # Send mic transcription to UI
                     await ws.send_text(msg("mic", {"text": text}))
 
-                    # Feed into brain — kill any in-progress response first
+                    # Feed into brain
                     if brain:
                         log.info("Debounced input → brain: %r", text)
                         await _kill_current_response()
