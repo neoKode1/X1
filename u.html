@@ -86,7 +86,7 @@
 </style>
 </head>
 
-<body class="m-0 w-screen h-screen overflow-hidden bg-[#050510] cursor-pointer select-none" onclick="toggleMute()">
+<body class="m-0 w-screen h-screen overflow-hidden bg-[#050510]">
 
   <!-- Static background — anchors perception so transforms don't move the "screen" -->
   <div id="static-bg"></div>
@@ -105,7 +105,7 @@
   </div>
 
   <!-- Chat overlay — bottom left -->
-  <div id="chat-log" style="position:fixed;bottom:24px;left:24px;right:24px;max-height:40vh;overflow-y:auto;z-index:100;display:flex;flex-direction:column;gap:6px;pointer-events:none;"></div>
+  <div id="chat-log" style="position:fixed;bottom:24px;left:24px;right:24px;max-height:40vh;overflow-y:auto;z-index:100;display:flex;flex-direction:column;gap:6px;"></div>
 
   <!-- Connection status badge — top left -->
   <div id="conn-dot" style="position:fixed;top:16px;left:16px;z-index:100;display:flex;align-items:center;gap:8px;pointer-events:none;">
@@ -420,7 +420,7 @@
     div.className = 'msg';
     const color = role === 'aria' ? '#e2e8f0' : '#94a3b8';
     const prefix = role === 'aria' ? '' : '🎙 ';
-    div.innerHTML = `<span style="font-family:monospace;font-size:13px;color:${color};background:rgba(0,0,0,0.4);padding:3px 10px;border-radius:8px;display:inline-block;max-width:80vw;backdrop-filter:blur(6px);line-height:1.5;"><span class="text">${prefix}${text}</span></span>`;
+    div.innerHTML = `<span style="font-family:monospace;font-size:13px;color:${color};background:rgba(0,0,0,0.4);padding:3px 10px;border-radius:8px;display:inline-block;max-width:80vw;backdrop-filter:blur(6px);line-height:1.5;user-select:text;cursor:text;"><span class="text">${prefix}${text}</span></span>`;
     chatLog.appendChild(div);
     // Keep max 30 messages
     while (chatLog.children.length > 30) chatLog.removeChild(chatLog.firstChild);
@@ -671,6 +671,14 @@
   document.addEventListener('mouseup', () => { dragging = false; resizing = false; });
   // Prevent drag/resize from triggering mute toggle
   wcPreview.addEventListener('click', (e) => { e.stopPropagation(); });
+
+  // Spacebar toggles pause/resume
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !e.repeat) {
+      e.preventDefault();
+      toggleMute();
+    }
+  });
 
   connect();
   </script>
