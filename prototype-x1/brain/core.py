@@ -72,9 +72,17 @@ class Brain:
         register_builtins()
         # Register delegate_task skill so LLM can call sub-agents
         self._register_delegate_skill()
+        self._last_frame_b64: str | None = None  # latest webcam JPEG (base64)
+        self._last_frame_ts: float = 0.0
         primary = self.cfg.llm.anthropic_model if self.cfg.llm.anthropic_api_key else self.cfg.llm.ollama_model
         log.info("Brain ready — name=%s primary=%s fallback=%s",
                  self.cfg.name, primary, self.cfg.llm.ollama_model)
+
+    def update_vision(self, frame_b64: str | None = None, **kwargs) -> None:
+        """Store the latest webcam frame for the next conversation turn."""
+        if frame_b64:
+            self._last_frame_b64 = frame_b64
+            self._last_frame_ts = time.time()
 
     def _register_delegate_skill(self) -> None:
         """Register the delegate tool that routes tasks to sub-agents."""
@@ -95,11 +103,15 @@ class Brain:
                 },
             )
 
-    def _build_messages(self, user_input: str, recalled: list) -> list[Message]:
-        """Build a minimal message list: system + recalled memory + chat history + user."""
+    def _build_messages(self, user_input: str, recalled: list, include_vision: bool = True) -> list[Message]:
+        """Build a minimal message list: system + recalled memory + chat history + user.
+
+        If a recent webcam frame is available and the primary LLM is Claude,
+        the user message includes the image as a vision content block.
+        """
         messages: list[Message] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # One recalled memory at most (keep context tiny for 3B model)
+        # One recalled memory at most
         if recalled:
             mem_block = "\n".join(
                 f"[{e.role}] {e.text[:120]}" for e in recalled[:1]
@@ -107,7 +119,20 @@ class Brain:
             messages.append({"role": "system", "content": mem_block})
 
         messages.extend(self.memory.as_messages(self.cfg.llm.context_window))
-        messages.append({"role": "user", "content": user_input})
+
+        # Build user message — with vision if available
+        frame = self._last_frame_b64
+        frame_fresh = (time.time() - self._last_frame_ts) < 30  # frame < 30s old
+        if include_vision and frame and frame_fresh and self.cfg.llm.anthropic_api_key:
+            # Multimodal message: image + text
+            user_content = [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": frame}},
+                {"type": "text", "text": user_input},
+            ]
+            messages.append({"role": "user", "content": user_content})
+            log.info("Vision frame attached to message (%d chars)", len(frame))
+        else:
+            messages.append({"role": "user", "content": user_input})
         return messages
 
     def _try_web_fetch(self, reply: str) -> str | None:

@@ -74,14 +74,29 @@ def _get_ollama_session():
     return _ollama_session
 
 
+def _strip_images(messages: list[Message]) -> list[Message]:
+    """Strip image content blocks for text-only models (Ollama fallback)."""
+    clean = []
+    for m in messages:
+        if isinstance(m.get("content"), list):
+            # Extract only text parts
+            text_parts = [p["text"] for p in m["content"] if isinstance(p, dict) and p.get("type") == "text"]
+            if text_parts:
+                clean.append({"role": m["role"], "content": " ".join(text_parts)})
+        else:
+            clean.append(m)
+    return clean
+
+
 def _try_ollama(cfg: "LLMConfig", messages: list[Message]) -> str | None:
     """Non-streaming Ollama call."""
     try:
         session = _get_ollama_session()
         url = f"{cfg.ollama_host.rstrip('/')}/api/chat"
+        msgs = _strip_images(messages)
         resp = session.post(url, json={
             "model": cfg.ollama_model,
-            "messages": messages,
+            "messages": msgs,
             "stream": False,
             "options": {
                 "temperature": cfg.temperature,
@@ -101,9 +116,10 @@ def _stream_ollama(cfg: "LLMConfig", messages: list[Message]):
     import json as _json
     session = _get_ollama_session()
     url = f"{cfg.ollama_host.rstrip('/')}/api/chat"
+    msgs = _strip_images(messages)
     resp = session.post(url, json={
         "model": cfg.ollama_model,
-        "messages": messages,
+        "messages": msgs,
         "stream": True,
         "options": {
             "temperature": cfg.temperature,

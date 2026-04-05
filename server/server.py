@@ -618,38 +618,13 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_text(status_msg("idle", {"paused": False, "mic": True}))
 
             elif kind == "vision":
-                # Face/expression data from MediaPipe in-browser detection
+                # Webcam frame from browser — store for next conversation turn
                 payload = data.get("payload", {})
-                face_present = payload.get("face", False)
-                expressions = payload.get("expressions", {})
-                frame_b64 = payload.get("frame")  # base64 JPEG from browser
-                log.info("Vision: face=%s expressions=%s frame=%s",
-                         face_present,
-                         {k: round(v, 2) for k, v in expressions.items()} if expressions else {},
-                         f"{len(frame_b64)}chars" if frame_b64 else "none")
+                frame_b64 = payload.get("frame")
                 brain = get_brain()
-                if brain is not None:
-                    # Derive mood from expressions
-                    smile = (expressions.get("mouthSmileLeft", 0) + expressions.get("mouthSmileRight", 0)) / 2
-                    frown = (expressions.get("mouthFrownLeft", 0) + expressions.get("mouthFrownRight", 0)) / 2
-                    brow_up = expressions.get("browInnerUp", 0)
-                    jaw_open = expressions.get("jawOpen", 0)
-                    if smile > 0.4:
-                        mood = "smiling"
-                    elif frown > 0.3:
-                        mood = "frowning"
-                    elif brow_up > 0.4:
-                        mood = "surprised"
-                    elif jaw_open > 0.5:
-                        mood = "mouth open / talking"
-                    else:
-                        mood = "neutral"
-                    brain.update_vision(
-                        state={"face_present": face_present, "expressions": expressions, "ts": time.time()},
-                        frame_b64=frame_b64,
-                        mood=mood,
-                    )
-                    log.info("Vision mood: %s", mood)
+                if brain is not None and frame_b64:
+                    brain.update_vision(frame_b64=frame_b64)
+                    log.debug("Vision frame stored (%d chars)", len(frame_b64))
 
     except WebSocketDisconnect:
         log.info("Client disconnected")
