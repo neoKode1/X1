@@ -104,8 +104,19 @@
     <span id="mute-label" style="font-family:monospace;font-size:14px;color:#facc15;background:rgba(0,0,0,0.5);padding:4px 14px;border-radius:20px;backdrop-filter:blur(8px);"></span>
   </div>
 
-  <!-- Chat overlay — bottom left -->
-  <div id="chat-log" style="position:fixed;bottom:24px;left:24px;right:24px;max-height:40vh;overflow-y:auto;z-index:100;display:flex;flex-direction:column;gap:6px;"></div>
+  <!-- Chat input bar — bottom -->
+  <div id="chat-input-bar" style="position:fixed;bottom:12px;left:24px;right:180px;z-index:110;display:flex;align-items:center;gap:6px;">
+    <label id="attach-btn" title="Attach file or image" style="cursor:pointer;font-size:18px;opacity:0.5;transition:opacity 0.2s;padding:4px;">📎
+      <input type="file" id="file-input" accept="image/*,.txt,.md,.pdf,.json,.csv" multiple style="display:none;">
+    </label>
+    <input type="text" id="chat-input" placeholder="Type a message or paste a link…"
+      style="flex:1;font-family:monospace;font-size:13px;color:#e2e8f0;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:8px 12px;outline:none;backdrop-filter:blur(8px);"
+    >
+    <button id="send-btn" title="Send" style="font-size:18px;background:none;border:none;cursor:pointer;opacity:0.5;transition:opacity 0.2s;padding:4px;">➤</button>
+  </div>
+
+  <!-- Chat overlay — above input -->
+  <div id="chat-log" style="position:fixed;bottom:48px;left:24px;right:24px;max-height:35vh;overflow-y:auto;z-index:100;display:flex;flex-direction:column;gap:6px;"></div>
 
   <!-- Connection status badge — top left -->
   <div id="conn-dot" style="position:fixed;top:16px;left:16px;z-index:100;display:flex;align-items:center;gap:8px;pointer-events:none;">
@@ -672,12 +683,65 @@
   // Prevent drag/resize from triggering mute toggle
   wcPreview.addEventListener('click', (e) => { e.stopPropagation(); });
 
-  // Spacebar toggles pause/resume
+  // Spacebar toggles pause/resume (only when not typing in input)
   document.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' && !e.repeat) {
+    if (e.code === 'Space' && !e.repeat && document.activeElement !== chatInput) {
       e.preventDefault();
       toggleMute();
     }
+  });
+
+  // ── Chat input: send text ──
+  const chatInput = document.getElementById('chat-input');
+  const sendBtn = document.getElementById('send-btn');
+  const attachBtn = document.getElementById('attach-btn');
+  const fileInput = document.getElementById('file-input');
+
+  function sendText() {
+    const text = chatInput.value.trim();
+    if (!text || !ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ kind: 'command', payload: { text, speaker: 'Neokode' } }));
+    addMsg('user', text);
+    chatInput.value = '';
+  }
+
+  sendBtn.addEventListener('click', (e) => { e.stopPropagation(); sendText(); });
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+  });
+
+  // Hover effects
+  sendBtn.addEventListener('mouseenter', () => sendBtn.style.opacity = '1');
+  sendBtn.addEventListener('mouseleave', () => sendBtn.style.opacity = '0.5');
+  attachBtn.addEventListener('mouseenter', () => attachBtn.style.opacity = '1');
+  attachBtn.addEventListener('mouseleave', () => attachBtn.style.opacity = '0.5');
+
+  // ── File/image upload ──
+  fileInput.addEventListener('change', async (e) => {
+    const files = e.target.files;
+    if (!files.length) return;
+    for (const file of files) {
+      if (file.type.startsWith('image/')) {
+        // Upload image to server
+        const form = new FormData();
+        form.append('file', file);
+        try {
+          const resp = await fetch('/knowledge/upload', { method: 'POST', body: form });
+          const data = await resp.json();
+          if (data.ok) {
+            addMsg('user', `📎 Uploaded image: ${file.name}`);
+            ws.send(JSON.stringify({ kind: 'command', payload: { text: `I just uploaded an image called "${file.name}". Acknowledge it.`, speaker: 'Neokode' } }));
+          }
+        } catch (err) { addMsg('user', `❌ Upload failed: ${err.message}`); }
+      } else {
+        // Text-based files — read and send as message
+        const text = await file.text();
+        const preview = text.slice(0, 2000);
+        ws.send(JSON.stringify({ kind: 'command', payload: { text: `Here is the content of ${file.name}:\n\n${preview}`, speaker: 'Neokode' } }));
+        addMsg('user', `📎 Sent file: ${file.name} (${text.length} chars)`);
+      }
+    }
+    fileInput.value = '';  // reset
   });
 
   connect();
