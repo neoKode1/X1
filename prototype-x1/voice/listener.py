@@ -96,6 +96,12 @@ class MicListener:
         self._stop = threading.Event()
         self.muted = threading.Event()  # set this while ARIA is speaking to avoid echo
         self._listening = False  # guard against duplicate listen() calls
+        self._last_rms: float = 0.0  # live mic volume (0.0 - 1.0 ish)
+
+    @property
+    def volume(self) -> float:
+        """Current mic RMS level (0.0 = silence, >0.03 = speech)."""
+        return self._last_rms
 
     def _load_model(self) -> None:
         if self._model is None:
@@ -184,6 +190,8 @@ class MicListener:
                     continue
 
                 rms = float(np.sqrt(np.mean(chunk ** 2)))
+                # Expose volume for external consumers
+                self._last_rms = rms
                 is_speech = rms > SILENCE_THRESHOLD
 
                 if is_speech:

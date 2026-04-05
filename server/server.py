@@ -531,6 +531,26 @@ async def websocket_endpoint(ws: WebSocket):
 
         mic_task = asyncio.create_task(mic_relay())
 
+    # ── Mic volume streamer (sends levels to frontend ~5x/sec) ────────────
+    async def volume_streamer():
+        """Send mic volume levels to the UI for the live level bar."""
+        while True:
+            try:
+                if mic is not None and hasattr(mic, 'volume'):
+                    vol = mic.volume
+                    is_speech = vol > 0.03
+                    await ws.send_json({"kind": "mic_level", "payload": {
+                        "volume": round(vol, 4),
+                        "speech": is_speech,
+                    }})
+                await asyncio.sleep(0.2)  # 5 Hz
+            except Exception:
+                break
+
+    vol_task = None
+    if mic is not None:
+        vol_task = asyncio.create_task(volume_streamer())
+
     try:
         while True:
             raw = await ws.receive_text()
@@ -635,6 +655,8 @@ async def websocket_endpoint(ws: WebSocket):
         _kill_active_say()
         if mic_task:
             mic_task.cancel()
+        if vol_task:
+            vol_task.cancel()
         # Stop the mic listener so it can be restarted on next connection
         if _mic_listener is not None:
             _mic_listener.stop()

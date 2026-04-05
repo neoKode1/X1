@@ -4,6 +4,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ARIA</title>
 <script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  // Pre-load MediaPipe as a proper ES module (file:// can't dynamic-import cross-origin)
+  try {
+    const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/vision_bundle.mjs');
+    window._mpVision = vision;
+    console.log('[MediaPipe] Module pre-loaded');
+  } catch (e) {
+    console.warn('[MediaPipe] Module pre-load failed:', e);
+    window._mpVision = null;
+  }
+</script>
 <style>
   body::after {
     content: '';
@@ -25,7 +36,8 @@
   /* Webcam preview */
   #webcam-preview {
     position: fixed; top: 16px; right: 16px; z-index: 200;
-    width: 180px; border-radius: 10px; overflow: hidden;
+    width: 180px; min-width: 100px; max-width: 80vw;
+    border-radius: 10px; overflow: hidden;
     border: 2px solid rgba(250,204,21,0.4);
     background: rgba(0,0,0,0.6); backdrop-filter: blur(8px);
     box-shadow: 0 4px 20px rgba(0,0,0,0.5);
@@ -34,15 +46,34 @@
   }
   #webcam-preview:active { cursor: grabbing; }
   #webcam-preview.no-feed { opacity: 0.3; border-color: rgba(248,113,113,0.5); }
-  #webcam-preview img { width: 100%; display: block; }
+  #webcam-preview video { width: 100%; display: block; transform: scaleX(-1); }
+  #webcam-preview canvas {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; transform: scaleX(-1);
+  }
+  /* Resize handle — bottom-right corner */
+  #wc-resize {
+    position: absolute; bottom: 0; right: 0; width: 18px; height: 18px;
+    cursor: nwse-resize; z-index: 210;
+    background: linear-gradient(135deg, transparent 50%, rgba(250,204,21,0.5) 50%);
+    border-radius: 0 0 8px 0;
+  }
+  #wc-resize:hover { background: linear-gradient(135deg, transparent 40%, rgba(250,204,21,0.8) 40%); }
   #webcam-status {
     position: absolute; bottom: 0; left: 0; right: 0;
     font-family: monospace; font-size: 10px; text-align: center;
     padding: 2px 0; color: #4ade80; background: rgba(0,0,0,0.6);
   }
   #webcam-status.off { color: #f87171; }
+  /* Static background — never moves, anchors perception */
+  #static-bg {
+    position: fixed; inset: 0; z-index: 0;
+    background: radial-gradient(ellipse at 50% 50%, #0a0a1a 0%, #050510 60%, #020208 100%);
+  }
   #anim-container {
-    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    position: fixed; z-index: 1;
+    /* Oversize by 15% on each side so translate/scale never reveals bare edges */
+    top: -8%; left: -8%; width: 116%; height: 116%;
     transition: filter 0.08s ease-out, transform 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
     will-change: transform, filter;
   }
@@ -57,7 +88,10 @@
 
 <body class="m-0 w-screen h-screen overflow-hidden bg-[#050510] cursor-pointer select-none" onclick="toggleMute()">
 
-  <!-- Fullscreen Animation Container -->
+  <!-- Static background — anchors perception so transforms don't move the "screen" -->
+  <div id="static-bg"></div>
+
+  <!-- Fullscreen Animation Container (oversized so edges never show) -->
   <div id="anim-container">
     <div data-us-project="lmSXlfVhWVrbN3qzElFu" data-us-scale="1" data-us-dpi="1.5" data-us-fps="60" data-us-lazyload="true" data-us-production="true" role="img" aria-label="Animated 3D background" style="width:100%;height:100%;"></div>
   </div>
@@ -73,16 +107,32 @@
   <!-- Chat overlay — bottom left -->
   <div id="chat-log" style="position:fixed;bottom:24px;left:24px;right:24px;max-height:40vh;overflow-y:auto;z-index:100;display:flex;flex-direction:column;gap:6px;pointer-events:none;"></div>
 
-  <!-- Connection dot — top left -->
-  <div id="conn-dot" style="position:fixed;top:16px;left:16px;z-index:100;display:flex;align-items:center;gap:6px;pointer-events:none;">
-    <span id="dot" style="width:8px;height:8px;border-radius:50%;background:#f87171;display:inline-block;"></span>
-    <span id="conn-text" style="font-family:monospace;font-size:11px;color:#475569;"></span>
+  <!-- Connection status badge — top left -->
+  <div id="conn-dot" style="position:fixed;top:16px;left:16px;z-index:100;display:flex;align-items:center;gap:8px;pointer-events:none;">
+    <span id="dot" style="width:10px;height:10px;border-radius:50%;background:#f87171;display:inline-block;box-shadow:0 0 6px #f87171;transition:background 0.3s,box-shadow 0.3s;"></span>
+    <span id="conn-text" style="font-family:monospace;font-size:12px;color:#f87171;letter-spacing:0.5px;text-transform:uppercase;transition:color 0.3s;">offline</span>
   </div>
 
-  <!-- Webcam preview — draggable, top right -->
+  <!-- Mic level + live transcription — bottom right -->
+  <div id="mic-panel" style="position:fixed;bottom:24px;right:24px;z-index:100;display:flex;flex-direction:column;align-items:flex-end;gap:6px;pointer-events:none;">
+    <!-- Live transcription preview -->
+    <div id="mic-transcript" style="font-family:monospace;font-size:12px;color:#94a3b8;background:rgba(0,0,0,0.5);padding:4px 12px;border-radius:8px;backdrop-filter:blur(8px);max-width:300px;text-align:right;opacity:0;transition:opacity 0.3s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+    <!-- Volume bar -->
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span id="mic-icon" style="font-size:16px;opacity:0.5;transition:opacity 0.2s;">🎙</span>
+      <div style="width:120px;height:6px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden;backdrop-filter:blur(4px);">
+        <div id="mic-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#4ade80,#facc15,#f87171);border-radius:3px;transition:width 0.05s ease-out;"></div>
+      </div>
+      <span id="mic-status-label" style="font-family:monospace;font-size:10px;color:#64748b;min-width:50px;">silent</span>
+    </div>
+  </div>
+
+  <!-- Webcam preview — draggable + resizable, top right -->
   <div id="webcam-preview" class="no-feed">
-    <img id="webcam-img" src="" alt="webcam feed">
+    <video id="webcam-video" autoplay playsinline muted></video>
+    <canvas id="webcam-canvas"></canvas>
     <div id="webcam-status" class="off">no feed</div>
+    <div id="wc-resize"></div>
   </div>
 
   <!-- Unicorn Studio SDK -->
@@ -148,9 +198,21 @@
     ariaState = newState;
   }
 
+  const micBar = document.getElementById('mic-bar');
+  const micIcon = document.getElementById('mic-icon');
+  const micStatusLabel = document.getElementById('mic-status-label');
+
   function audioLoop() {
     const raw = getVolume();
     smoothVol = raw > smoothVol ? raw * 0.6 + smoothVol * 0.4 : raw * 0.15 + smoothVol * 0.85;
+
+    // Drive mic level bar
+    const barPct = Math.min(100, smoothVol * 250);
+    micBar.style.width = barPct + '%';
+    micIcon.style.opacity = smoothVol > 0.03 ? '1' : '0.4';
+    micStatusLabel.textContent = smoothVol > 0.15 ? 'speaking' : smoothVol > 0.03 ? 'hearing' : 'silent';
+    micStatusLabel.style.color = smoothVol > 0.15 ? '#4ade80' : smoothVol > 0.03 ? '#facc15' : '#64748b';
+
     applyReactivity(smoothVol);
     requestAnimationFrame(audioLoop);
   }
@@ -230,12 +292,16 @@
     ws = new WebSocket(WS_URL);
     ws.onopen = () => {
       dot.style.background = '#4ade80';
-      connText.textContent = '';
+      dot.style.boxShadow = '0 0 8px #4ade80';
+      connText.textContent = 'ARIA online';
+      connText.style.color = '#4ade80';
       clearTimeout(reconnectTimer);
     };
     ws.onclose = () => {
       dot.style.background = '#f87171';
-      connText.textContent = 'reconnecting…';
+      dot.style.boxShadow = '0 0 6px #f87171';
+      connText.textContent = 'offline';
+      connText.style.color = '#f87171';
       streamEl = null;
       reconnectTimer = setTimeout(connect, 2000);
     };
@@ -251,6 +317,10 @@
         streamEl = addMsg('aria', '');
         streamEl.querySelector('.text').classList.add('cursor-blink');
         setAriaState('thinking');
+        connText.textContent = 'ARIA thinking…';
+        connText.style.color = '#facc15';
+        dot.style.background = '#facc15';
+        dot.style.boxShadow = '0 0 8px #facc15';
         break;
       case 'token': {
         const t = msg.payload?.text || '';
@@ -274,23 +344,71 @@
         } else if (msg.payload?.text) {
           addMsg('aria', msg.payload.text);
         }
+        // Restore online badge after response completes
+        connText.textContent = 'ARIA online';
+        connText.style.color = '#4ade80';
+        dot.style.background = '#4ade80';
+        dot.style.boxShadow = '0 0 8px #4ade80';
         break;
       }
       case 'mic':
-        if (msg.payload?.text) addMsg('user', msg.payload.text);
+        if (msg.payload?.text) {
+          addMsg('user', msg.payload.text);
+          // Flash transcription in mic panel
+          const micTranscript = document.getElementById('mic-transcript');
+          micTranscript.textContent = '🎙 ' + msg.payload.text;
+          micTranscript.style.opacity = '1';
+          micTranscript.style.color = '#4ade80';
+          clearTimeout(window._micFadeTimer);
+          window._micFadeTimer = setTimeout(() => {
+            micTranscript.style.opacity = '0';
+          }, 4000);
+        }
         break;
       case 'tts':
         isSpeaking = !!msg.payload?.speaking;
-        if (isSpeaking) setAriaState('talking');
+        if (isSpeaking) {
+          setAriaState('talking');
+          connText.textContent = 'ARIA speaking';
+          connText.style.color = '#38bdf8';
+          dot.style.background = '#38bdf8';
+          dot.style.boxShadow = '0 0 8px #38bdf8';
+        } else {
+          connText.textContent = 'ARIA online';
+          connText.style.color = '#4ade80';
+          dot.style.background = '#4ade80';
+          dot.style.boxShadow = '0 0 8px #4ade80';
+        }
         break;
+      case 'mic_level': {
+        // Server-side mic volume — drives the bar even if browser mic isn't available
+        const vol = msg.payload?.volume || 0;
+        const speech = msg.payload?.speech || false;
+        const pct = Math.min(100, vol * 250);
+        micBar.style.width = pct + '%';
+        micIcon.style.opacity = speech ? '1' : '0.4';
+        micStatusLabel.textContent = vol > 0.15 ? 'speaking' : speech ? 'hearing' : 'silent';
+        micStatusLabel.style.color = vol > 0.15 ? '#4ade80' : speech ? '#facc15' : '#64748b';
+        break;
+      }
       case 'status':
         if (msg.payload?.paused !== undefined) {
           muted = msg.payload.paused;
           showMuteState();
-          if (muted) { setAriaState('muted'); }
-          else { setAriaState('idle'); }
+          if (muted) {
+            setAriaState('muted');
+            connText.textContent = 'ARIA paused';
+            connText.style.color = '#facc15';
+            dot.style.background = '#facc15';
+            dot.style.boxShadow = '0 0 6px #facc15';
+          } else {
+            setAriaState('idle');
+            connText.textContent = 'ARIA online';
+            connText.style.color = '#4ade80';
+            dot.style.background = '#4ade80';
+            dot.style.boxShadow = '0 0 8px #4ade80';
+          }
         } else {
-          // status kind without paused = state update (e.g. idle)
           if (!muted) setAriaState('idle');
         }
         break;
@@ -323,70 +441,235 @@
   }
 
   function showMuteState() {
-    muteLabel.textContent = muted ? '🔇 muted' : '🎙 listening';
+    muteLabel.textContent = muted ? '⏸ paused' : '▶ listening';
     muteIndicator.style.opacity = '1';
     setTimeout(() => { muteIndicator.style.opacity = '0'; }, 1800);
   }
 
-  // ── Webcam preview polling + dragging ─────────────────────────
+  // ── Live webcam + MediaPipe face detection ──────────────────────
   const wcPreview = document.getElementById('webcam-preview');
-  const wcImg = document.getElementById('webcam-img');
+  const wcVideo = document.getElementById('webcam-video');
+  const wcCanvas = document.getElementById('webcam-canvas');
+  const wcCtx = wcCanvas.getContext('2d');
   const wcStatus = document.getElementById('webcam-status');
   let wcHasFeed = false;
+  let faceLandmarker = null;
+  let lastFaceTime = 0;
 
-  async function pollWebcam() {
+  // Load MediaPipe Tasks Vision (pre-loaded as module in <head>)
+  async function loadMediaPipe() {
     try {
-      const res = await fetch('http://localhost:8000/webcam/snapshot', { cache: 'no-store' });
-      if (res.ok && res.headers.get('content-type')?.includes('image')) {
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        wcImg.onload = () => URL.revokeObjectURL(url);
-        wcImg.src = url;
-        if (!wcHasFeed) {
-          wcHasFeed = true;
-          wcPreview.classList.remove('no-feed');
-          wcStatus.textContent = '● live';
-          wcStatus.className = '';
-          wcStatus.id = 'webcam-status';
-        }
-      } else {
-        if (wcHasFeed) {
-          wcHasFeed = false;
-          wcPreview.classList.add('no-feed');
-          wcStatus.textContent = 'no feed';
-          wcStatus.className = 'off';
-          wcStatus.id = 'webcam-status';
-        }
+      // Wait for module pre-load (up to 10s)
+      for (let i = 0; i < 100 && window._mpVision === undefined; i++) {
+        await new Promise(r => setTimeout(r, 100));
       }
-    } catch {
-      if (wcHasFeed) {
-        wcHasFeed = false;
-        wcPreview.classList.add('no-feed');
-        wcStatus.textContent = 'no feed';
-        wcStatus.className = 'off';
-        wcStatus.id = 'webcam-status';
-      }
+      if (!window._mpVision) throw new Error('Module did not load');
+      const { FaceLandmarker, FilesetResolver, DrawingUtils } = window._mpVision;
+      const filesetResolver = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm'
+      );
+      faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+          delegate: 'GPU'
+        },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: false
+      });
+      window._mpDrawingUtils = DrawingUtils;
+      window._mpFaceLandmarker = FaceLandmarker;
+      console.log('[MediaPipe] FaceLandmarker ready');
+    } catch (e) {
+      console.warn('[MediaPipe] Failed to load — face detection disabled:', e);
     }
   }
-  setInterval(pollWebcam, 2000);
-  pollWebcam();
+  loadMediaPipe();
 
-  // Drag logic
-  let dragging = false, dragOffX = 0, dragOffY = 0;
+  // Start live webcam stream
+  async function startWebcam() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+        audio: false
+      });
+      wcVideo.srcObject = stream;
+      wcVideo.addEventListener('loadeddata', () => {
+        wcHasFeed = true;
+        wcPreview.classList.remove('no-feed');
+        wcStatus.textContent = '● live';
+        wcStatus.className = '';
+        wcStatus.id = 'webcam-status';
+        wcCanvas.width = wcVideo.videoWidth;
+        wcCanvas.height = wcVideo.videoHeight;
+        detectLoop();
+      });
+    } catch (e) {
+      console.warn('[Webcam] Access denied or unavailable:', e);
+      wcStatus.textContent = 'no feed';
+      wcStatus.className = 'off';
+      wcStatus.id = 'webcam-status';
+    }
+  }
+  startWebcam();
+
+  // Hidden canvas for capturing low-res frames to send to Qwen3-VL
+  const frameCanvas = document.createElement('canvas');
+  frameCanvas.width = 160; frameCanvas.height = 120;
+  const frameCtx = frameCanvas.getContext('2d');
+  let lastFrameSend = 0;
+  const FRAME_INTERVAL_MS = 5000; // send a frame every 5s (vision is expensive)
+
+  function captureFrame() {
+    if (!wcHasFeed || !wcVideo.videoWidth) return null;
+    frameCtx.drawImage(wcVideo, 0, 0, 160, 120);
+    // Return base64 JPEG without the data:image/jpeg;base64, prefix
+    const dataUrl = frameCanvas.toDataURL('image/jpeg', 0.4);
+    return dataUrl.split(',')[1]; // strip prefix, return raw base64
+  }
+
+  // Face detection loop — runs on every animation frame
+  let lastDetectMs = 0;
+  function detectLoop() {
+    if (!wcHasFeed) return;
+    const now = performance.now();
+    // Clear canvas
+    wcCtx.clearRect(0, 0, wcCanvas.width, wcCanvas.height);
+
+    if (faceLandmarker && now - lastDetectMs > 66) { // ~15fps detection
+      lastDetectMs = now;
+      try {
+        const results = faceLandmarker.detectForVideo(wcVideo, now);
+        if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+          // Draw face mesh
+          const landmarks = results.faceLandmarks[0];
+          drawFaceMesh(landmarks);
+
+          // Update status
+          lastFaceTime = Date.now();
+
+          // Send blendshapes to server if available
+          if (results.faceBlendshapes && results.faceBlendshapes.length > 0 && ws && ws.readyState === 1) {
+            const shapes = results.faceBlendshapes[0].categories;
+            // Extract key expressions
+            const expr = {};
+            for (const s of shapes) {
+              if (['browInnerUp', 'eyeSquintLeft', 'eyeSquintRight', 'jawOpen',
+                   'mouthSmileLeft', 'mouthSmileRight', 'mouthFrownLeft', 'mouthFrownRight',
+                   'eyeBlinkLeft', 'eyeBlinkRight'].includes(s.categoryName)) {
+                expr[s.categoryName] = Math.round(s.score * 100) / 100;
+              }
+            }
+            // Derive mood for status display
+            const smile = ((expr.mouthSmileLeft||0) + (expr.mouthSmileRight||0)) / 2;
+            const frown = ((expr.mouthFrownLeft||0) + (expr.mouthFrownRight||0)) / 2;
+            const brow = expr.browInnerUp || 0;
+            const jaw = expr.jawOpen || 0;
+            const blink = ((expr.eyeBlinkLeft||0) + (expr.eyeBlinkRight||0)) / 2;
+            let mood = 'neutral';
+            if (smile > 0.4) mood = 'smile ' + Math.round(smile*100) + '%';
+            else if (frown > 0.3) mood = 'frown';
+            else if (brow > 0.4) mood = 'surprised';
+            else if (jaw > 0.5) mood = 'talking';
+            else if (blink > 0.5) mood = 'blink';
+            wcStatus.textContent = '● face · ' + mood;
+
+            // Throttle expressions: send at most every 500ms
+            if (now - (window._lastExprSend || 0) > 500) {
+              window._lastExprSend = now;
+              // Capture a frame every FRAME_INTERVAL_MS for native vision
+              let frame = null;
+              if (now - lastFrameSend > FRAME_INTERVAL_MS) {
+                frame = captureFrame();
+                if (frame) lastFrameSend = now;
+              }
+              ws.send(JSON.stringify({ kind: 'vision', payload: { face: true, expressions: expr, frame } }));
+            }
+          } else {
+            wcStatus.textContent = '● face detected';
+          }
+        } else {
+          // No face
+          if (Date.now() - lastFaceTime > 3000 && wcHasFeed) {
+            wcStatus.textContent = '● live (no face)';
+          }
+        }
+      } catch (e) { /* detection error, skip frame */ }
+    }
+    requestAnimationFrame(detectLoop);
+  }
+
+  // Draw minimal face mesh overlay
+  function drawFaceMesh(landmarks) {
+    wcCtx.save();
+    // Draw dots at key landmark positions
+    wcCtx.fillStyle = 'rgba(250, 204, 21, 0.4)';
+    // Face oval indices (simplified)
+    const keyPoints = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+                       397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+                       172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
+    for (const idx of keyPoints) {
+      if (landmarks[idx]) {
+        const x = landmarks[idx].x * wcCanvas.width;
+        const y = landmarks[idx].y * wcCanvas.height;
+        wcCtx.beginPath();
+        wcCtx.arc(x, y, 1.5, 0, 2 * Math.PI);
+        wcCtx.fill();
+      }
+    }
+    // Eye outlines
+    wcCtx.strokeStyle = 'rgba(74, 222, 128, 0.5)';
+    wcCtx.lineWidth = 1;
+    const leftEye = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246];
+    const rightEye = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398];
+    for (const eye of [leftEye, rightEye]) {
+      wcCtx.beginPath();
+      for (let i = 0; i < eye.length; i++) {
+        const pt = landmarks[eye[i]];
+        if (!pt) continue;
+        const x = pt.x * wcCanvas.width, y = pt.y * wcCanvas.height;
+        i === 0 ? wcCtx.moveTo(x, y) : wcCtx.lineTo(x, y);
+      }
+      wcCtx.closePath();
+      wcCtx.stroke();
+    }
+    wcCtx.restore();
+  }
+
+  // Drag logic (move from body, resize from handle)
+  let dragging = false, resizing = false, dragOffX = 0, dragOffY = 0, resizeStartW = 0, resizeStartX = 0;
+  const wcResize = document.getElementById('wc-resize');
+
+  // Resize handle
+  wcResize.addEventListener('mousedown', (e) => {
+    resizing = true;
+    resizeStartW = wcPreview.getBoundingClientRect().width;
+    resizeStartX = e.clientX;
+    e.preventDefault(); e.stopPropagation();
+  });
+
+  // Move handle (anywhere except resize corner)
   wcPreview.addEventListener('mousedown', (e) => {
+    if (resizing) return;
     dragging = true;
     dragOffX = e.clientX - wcPreview.getBoundingClientRect().left;
     dragOffY = e.clientY - wcPreview.getBoundingClientRect().top;
     e.preventDefault(); e.stopPropagation();
   });
+
   document.addEventListener('mousemove', (e) => {
-    if (!dragging) return;
-    wcPreview.style.left = (e.clientX - dragOffX) + 'px';
-    wcPreview.style.top = (e.clientY - dragOffY) + 'px';
-    wcPreview.style.right = 'auto';
+    if (resizing) {
+      const newW = Math.max(100, Math.min(window.innerWidth * 0.8, resizeStartW + (e.clientX - resizeStartX)));
+      wcPreview.style.width = newW + 'px';
+    } else if (dragging) {
+      wcPreview.style.left = (e.clientX - dragOffX) + 'px';
+      wcPreview.style.top = (e.clientY - dragOffY) + 'px';
+      wcPreview.style.right = 'auto';
+    }
   });
-  document.addEventListener('mouseup', () => { dragging = false; });
-  // Prevent drag from triggering mute toggle
+  document.addEventListener('mouseup', () => { dragging = false; resizing = false; });
+  // Prevent drag/resize from triggering mute toggle
   wcPreview.addEventListener('click', (e) => { e.stopPropagation(); });
 
   connect();
