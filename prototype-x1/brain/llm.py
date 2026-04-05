@@ -1,28 +1,72 @@
 """
-LLM dispatch: Ollama first, cloud fallback.
-Returns a plain string (the assistant reply).
-
-Supports multimodal (image) messages for vision-capable models like Qwen3-VL.
-Messages may include an "images" key with a list of base64-encoded image strings.
+LLM dispatch: Claude primary, Ollama fallback.
+Claude handles conversation + vision. Ollama is the local safety net.
 """
 from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
-
-from .filters import strip_think_blocks
 
 if TYPE_CHECKING:
     from .config import LLMConfig
 
 log = logging.getLogger("x1.llm")
 
-Message = dict  # {"role": ..., "content": str, "images"?: list[str]}
+Message = dict  # {"role": ..., "content": str}
 
-# Persistent HTTP session for Ollama — reuses TCP connections across calls
-_ollama_session: "import('requests').Session | None" = None
+# ── Anthropic (primary) ──────────────────────────────────────────────────────
+_anthropic_client = None
+
+def _get_anthropic_client(cfg: "LLMConfig"):
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+    return _anthropic_client
+
+
+def _prep_anthropic(messages: list[Message]) -> tuple[str, list[Message]]:
+    """Split system prompt from conversation messages."""
+    system_parts = [m["content"] for m in messages if m["role"] == "system"]
+    system = "\n\n".join(system_parts) if system_parts else ""
+    conv = [m for m in messages if m["role"] != "system"]
+    return system, conv
+
+
+def _try_anthropic(cfg: "LLMConfig", messages: list[Message]) -> str | None:
+    """Non-streaming Anthropic call."""
+    try:
+        client = _get_anthropic_client(cfg)
+        system, conv = _prep_anthropic(messages)
+        resp = client.messages.create(
+            model=cfg.anthropic_model,
+            max_tokens=cfg.max_tokens,
+            system=system,
+            messages=conv,
+        )
+        return resp.content[0].text
+    except Exception as e:
+        log.warning("Anthropic failed (%s), falling back", e)
+        return None
+
+
+def _stream_anthropic(cfg: "LLMConfig", messages: list[Message]):
+    """Yield (token, provider) from Anthropic streaming API."""
+    client = _get_anthropic_client(cfg)
+    system, conv = _prep_anthropic(messages)
+    with client.messages.stream(
+        model=cfg.anthropic_model,
+        max_tokens=cfg.max_tokens,
+        system=system,
+        messages=conv,
+    ) as stream:
+        for text in stream.text_stream:
+            yield text, "anthropic"
+
+
+# ── Ollama (fallback) ────────────────────────────────────────────────────────
+_ollama_session = None
 
 def _get_ollama_session():
-    """Get or create a persistent requests.Session for Ollama connection pooling."""
     global _ollama_session
     if _ollama_session is None:
         import requests as _requests
@@ -31,230 +75,82 @@ def _get_ollama_session():
 
 
 def _try_ollama(cfg: "LLMConfig", messages: list[Message]) -> str | None:
-    """Non-streaming Ollama call via raw HTTP (bypasses broken ollama library think=False)."""
+    """Non-streaming Ollama call."""
     try:
-        import json as _json
-
         session = _get_ollama_session()
-        base_url = cfg.ollama_host.rstrip("/")
-        url = f"{base_url}/api/chat"
+        url = f"{cfg.ollama_host.rstrip('/')}/api/chat"
         resp = session.post(url, json={
             "model": cfg.ollama_model,
             "messages": messages,
             "stream": False,
-            "think": False,
             "options": {
                 "temperature": cfg.temperature,
                 "num_predict": cfg.max_tokens,
                 "num_ctx": cfg.num_ctx,
             },
-        }, timeout=120)
+        }, timeout=60)
         resp.raise_for_status()
-        data = resp.json()
-        content = data.get("message", {}).get("content", "") or ""
-        return strip_think_blocks(content)
+        return resp.json().get("message", {}).get("content", "") or ""
     except Exception as e:
-        log.warning("Ollama unavailable (%s), falling back to cloud", e)
+        log.warning("Ollama fallback also failed: %s", e)
         return None
 
 
-def _try_anthropic(cfg: "LLMConfig", messages: list[Message]) -> str:
-    import anthropic
-    system = next((m["content"] for m in messages if m["role"] == "system"), "")
-    conv = [m for m in messages if m["role"] != "system"]
-    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
-    resp = client.messages.create(
-        model=cfg.anthropic_model,
-        max_tokens=cfg.max_tokens,
-        system=system,
-        messages=conv,
-    )
-    return resp.content[0].text
-
-
-def _try_openai(cfg: "LLMConfig", messages: list[Message]) -> str:
-    from openai import OpenAI
-    client = OpenAI(api_key=cfg.openai_api_key)
-    resp = client.chat.completions.create(
-        model=cfg.openai_model,
-        messages=messages,
-        temperature=cfg.temperature,
-        max_tokens=cfg.max_tokens,
-    )
-    return resp.choices[0].message.content or ""
-
-
-
-
-
-def _ollama_stream_attempt(cfg: "LLMConfig", messages: list[Message],
-                           timeout_sec: float = 120,
-                           think_timeout_sec: float = 15,
-                           temperature: float | None = None):
-    """Single raw-HTTP streaming attempt against Ollama.
-
-    Yields (token_text, "ollama") tuples.
-    Raises _ThinkingTimeout if no content token arrives within think_timeout_sec.
-    Raises on connection / HTTP errors.
-    """
-    import time as _time
+def _stream_ollama(cfg: "LLMConfig", messages: list[Message]):
+    """Yield (token, provider) from Ollama streaming API."""
     import json as _json
-
     session = _get_ollama_session()
-    base_url = cfg.ollama_host.rstrip("/")
-    url = f"{base_url}/api/chat"
-    t0 = _time.monotonic()
-
+    url = f"{cfg.ollama_host.rstrip('/')}/api/chat"
     resp = session.post(url, json={
         "model": cfg.ollama_model,
         "messages": messages,
         "stream": True,
-        "think": False,
         "options": {
-            "temperature": temperature if temperature is not None else cfg.temperature,
+            "temperature": cfg.temperature,
             "num_predict": cfg.max_tokens,
             "num_ctx": cfg.num_ctx,
         },
-    }, stream=True, timeout=timeout_sec)
+    }, stream=True, timeout=60)
     resp.raise_for_status()
-
-    first_content_time = None
-    thinking_chars = 0
-    content_chars = 0
-
     for line in resp.iter_lines():
         if not line:
             continue
         data = _json.loads(line)
-        msg = data.get("message", {})
-
-        thinking = msg.get("thinking", "")
-        if thinking:
-            thinking_chars += len(thinking)
-
-        # Check thinking timeout — abort early if model is stuck
-        elapsed = _time.monotonic() - t0
-        if first_content_time is None and elapsed > think_timeout_sec:
-            resp.close()
-            raise _ThinkingTimeout(thinking_chars, elapsed)
-
-        token = msg.get("content", "")
-        if not token:
-            if data.get("done"):
-                break
-            continue
-
-        if first_content_time is None:
-            first_content_time = _time.monotonic()
-            log.info("⏱ First content token at %.1fs (after %d chars thinking)",
-                     first_content_time - t0, thinking_chars)
-
-        clean = strip_think_blocks(token)
-        if clean:
-            content_chars += len(clean)
-            yield clean, "ollama"
-
+        token = data.get("message", {}).get("content", "")
+        if token:
+            yield token, "ollama"
         if data.get("done"):
             break
 
-    elapsed = _time.monotonic() - t0
-    log.info("⏱ Ollama done in %.1fs — thinking=%d chars, content=%d chars",
-             elapsed, thinking_chars, content_chars)
 
-
-class _ThinkingTimeout(Exception):
-    def __init__(self, thinking_chars: int, elapsed: float):
-        self.thinking_chars = thinking_chars
-        self.elapsed = elapsed
-        super().__init__(f"Thinking timeout: {thinking_chars} chars in {elapsed:.1f}s")
-
-
-_MINIMAL_SYSTEM = (
-    "You are ARIA, a cyberpunk robot. Neokode is your founder. "
-    "Answer in 1-2 sentences. Be direct. /no_think"
-)
-
-
-def _strip_to_minimal(messages: list[Message]) -> list[Message]:
-    """Return an ultra-minimal prompt: tiny system + last user message only."""
-    user = [m for m in reversed(messages) if m.get("role") == "user"][:1]
-    return [{"role": "system", "content": _MINIMAL_SYSTEM}] + user
-
-
-def stream_llm(cfg: "LLMConfig", messages: list[Message]):
-    """Yield (token_text, provider) tuples as they arrive from Ollama.
-
-    Strategy: attempt streaming with full context. If the model gets stuck
-    thinking for >25s, abort and retry with a minimal prompt (system + user
-    only, no history/memories). If that also fails, fall back to cloud.
-    """
-    # Attempt 1: full context, tight thinking budget (12s)
-    # Casual chat on 8B should produce content tokens within 12s.
-    # If not, the minimal prompt retry is faster than waiting longer.
-    try:
-        yield from _ollama_stream_attempt(cfg, messages, think_timeout_sec=12)
-        return
-    except _ThinkingTimeout as e:
-        log.warning("⏱ Thinking timeout (attempt 1): %d chars in %.1fs — retrying minimal",
-                    e.thinking_chars, e.elapsed)
-    except Exception as e:
-        log.warning("Ollama streaming failed (attempt 1): %s", e)
-        # Fall through to retry below
-
-    # Attempt 2: minimal prompt + low temp + moderate thinking budget (25s)
-    try:
-        minimal = _strip_to_minimal(messages)
-        log.info("⏱ Retry with minimal prompt (%d messages), temp=0.15", len(minimal))
-        yield from _ollama_stream_attempt(cfg, minimal, timeout_sec=60,
-                                          think_timeout_sec=25, temperature=0.15)
-        return
-    except _ThinkingTimeout as e:
-        log.warning("⏱ Thinking timeout (attempt 2): %d chars in %.1fs — cloud fallback",
-                    e.thinking_chars, e.elapsed)
-    except Exception as e:
-        log.warning("Ollama streaming failed (attempt 2): %s — cloud fallback", e)
-
-    # Cloud fallback — skip Ollama entirely (it's likely still busy)
-    reply, provider = _cloud_only(cfg, messages)
-    if reply:
-        yield reply, provider
-    else:
-        log.error("All LLM backends failed — no response")
-
-
-def _cloud_only(cfg: "LLMConfig", messages: list[Message]) -> tuple[str, str]:
-    """Try cloud providers only — skips Ollama entirely."""
-    try:
-        if cfg.cloud_fallback == "anthropic" and cfg.anthropic_api_key:
-            return _try_anthropic(cfg, messages), "anthropic"
-        if cfg.cloud_fallback == "openai" and cfg.openai_api_key:
-            return _try_openai(cfg, messages), "openai"
-        if cfg.anthropic_api_key:
-            return _try_anthropic(cfg, messages), "anthropic"
-        if cfg.openai_api_key:
-            return _try_openai(cfg, messages), "openai"
-    except Exception as e:
-        log.error("Cloud fallback failed: %s", e)
-    return "", "none"
-
+# ── Dispatch: primary → fallback ─────────────────────────────────────────────
 
 def call_llm(cfg: "LLMConfig", messages: list[Message]) -> tuple[str, str]:
-    """Returns (reply_text, provider_used)."""
-    # 1. Try Ollama
+    """Non-streaming. Returns (reply_text, provider)."""
+    # Primary: Anthropic
+    if cfg.anthropic_api_key:
+        reply = _try_anthropic(cfg, messages)
+        if reply is not None:
+            return reply, "anthropic"
+    # Fallback: Ollama
     reply = _try_ollama(cfg, messages)
     if reply is not None:
         return reply, "ollama"
+    return "", "none"
 
-    # 2. Cloud fallback
-    if cfg.cloud_fallback == "anthropic" and cfg.anthropic_api_key:
-        return _try_anthropic(cfg, messages), "anthropic"
-    if cfg.cloud_fallback == "openai" and cfg.openai_api_key:
-        return _try_openai(cfg, messages), "openai"
 
-    # 3. Try whichever cloud key is present
+def stream_llm(cfg: "LLMConfig", messages: list[Message]):
+    """Yield (token, provider). Claude primary, Ollama fallback."""
+    # Primary: stream from Anthropic
     if cfg.anthropic_api_key:
-        return _try_anthropic(cfg, messages), "anthropic"
-    if cfg.openai_api_key:
-        return _try_openai(cfg, messages), "openai"
+        try:
+            yield from _stream_anthropic(cfg, messages)
+            return
+        except Exception as e:
+            log.warning("Anthropic stream failed (%s), falling back to Ollama", e)
 
-    raise RuntimeError("No LLM available: Ollama offline and no cloud API key set.")
+    # Fallback: stream from Ollama
+    try:
+        yield from _stream_ollama(cfg, messages)
+    except Exception as e:
+        log.error("All LLM backends failed: %s", e)

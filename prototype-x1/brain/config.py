@@ -13,17 +13,21 @@ except ImportError:
 
 @dataclass
 class LLMConfig:
-    ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
-    ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "qwen3-vl:8b"))
+    # Primary: Anthropic Claude (vision + reasoning)
+    primary: str = field(default_factory=lambda: os.getenv("LLM_PRIMARY", "anthropic"))
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
-    anthropic_model: str = field(default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022"))
+    anthropic_model: str = field(default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"))
+    # Fallback: Ollama (local)
+    ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+    ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.2"))
+    # Optional: OpenAI
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
-    cloud_fallback: str = field(default_factory=lambda: os.getenv("CLOUD_FALLBACK", "anthropic"))
+    cloud_fallback: str = field(default_factory=lambda: os.getenv("CLOUD_FALLBACK", "ollama"))
     temperature: float = 0.4
-    max_tokens: int = 8192
-    num_ctx: int = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
-    context_window: int = 2
+    max_tokens: int = 1024
+    num_ctx: int = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
+    context_window: int = 6
 
 
 @dataclass
